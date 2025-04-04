@@ -20,11 +20,12 @@ from typing import List, Mapping, Optional, Tuple, Union, Any
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import coordinate_utils
 
 try:
-    from mediapipe.framework.formats import detection_pb2
-    from mediapipe.framework.formats import landmark_pb2
-    from mediapipe.framework.formats import location_data_pb2
+  from mediapipe.framework.formats import detection_pb2
+  from mediapipe.framework.formats import landmark_pb2
+  from mediapipe.framework.formats import location_data_pb2
 except ImportError:
     print("Warning: mediapipe not found. Some functionality may be limited.")
     # Create dummy classes for the protobuf messages
@@ -53,7 +54,6 @@ BLACK_COLOR = (0, 0, 0)
 RED_COLOR = (0, 0, 255)
 GREEN_COLOR = (0, 128, 0)
 BLUE_COLOR = (255, 0, 0)
-
 
 @dataclasses.dataclass
 class DrawingSpec:
@@ -104,89 +104,86 @@ def __load_obj_vertices_faces(obj_path):
   
   try:
     with open(obj_path, 'r') as f:
-      vertex_count = 0
-      normal_count = 0
-      face_count = 0
-      for line in f:
-        if line.startswith('v '):  # vertex
-          try:
-            _, x, y, z = line.strip().split()
-            vertices.append([float(x), float(y), float(z)])
-            vertex_count += 1
-          except ValueError as e:
-            print(f"Warning: Invalid vertex line: {line.strip()}")
-            continue
-        elif line.startswith('vn '):  # vertex normal
-          try:
-            _, x, y, z = line.strip().split()
-            vertex_normals.append([float(x), float(y), float(z)])
-            normal_count += 1
-          except ValueError as e:
-            print(f"Warning: Invalid normal line: {line.strip()}")
-            continue
-        elif line.startswith('f '):  # face
-          try:
-            # Handle different face formats (v, v/vt, v/vt/vn)
-            face_indices = []
-            normal_indices = []
-            for idx in line.strip().split()[1:]:
-              # Split by '/' and get vertex and normal indices
-              parts = idx.split('/')
-              if len(parts) >= 3:  # v/vt/vn format
-                v_idx = parts[0]
-                n_idx = parts[2] if len(parts) > 2 else None
-                if v_idx:
-                  face_indices.append(int(v_idx) - 1)  # OBJ indices are 1-based
-                if n_idx:
-                  normal_indices.append(int(n_idx) - 1)
-              else:  # v format
-                face_indices.append(int(parts[0]) - 1)
-            
-            if len(face_indices) >= 3:
-              faces.append(face_indices[:3])  # use triangle only
-              face_count += 1
-          except (ValueError, IndexError) as e:
-            print(f"Warning: Invalid face line: {line.strip()}")
-            continue
-            
-    vertices = np.array(vertices)
-    faces = np.array(faces)
-    
-    print(f"Successfully loaded OBJ file:")
-    print(f"- Number of vertices: {len(vertices)}")
-    print(f"- Number of vertex normals: {len(vertex_normals)}")
-    print(f"- Number of faces: {len(faces)}")
-    print(f"- Vertex shape: {vertices.shape}")
-    print(f"- Face shape: {faces.shape}")
-    
-    if len(vertices) == 0:
-      raise ValueError("No vertices found in OBJ file")
-    if len(faces) == 0:
-      raise ValueError("No faces found in OBJ file")
-      
-    return vertices, faces
-    
-  except FileNotFoundError:
-    print(f"Error: OBJ file not found: {obj_path}")
-    raise
+        vertex_count = 0
+        normal_count = 0
+        face_count = 0
+        for line in f:
+            if line.startswith('v '):  # vertex
+              try:
+                _, x, y, z = line.strip().split()
+                vertices.append([float(x), float(y), -float(z)])
+                vertex_count += 1
+              except ValueError as e:
+                print(f"Warning: Invalid vertex line: {line.strip()}")
+                continue
+            elif line.startswith('vn '):  # vertex normal
+              try:
+                _, x, y, z = line.strip().split()
+                vertex_normals.append([float(x), float(y), -float(z)])
+                normal_count += 1
+              except ValueError as e:
+                print(f"Warning: Invalid normal line: {line.strip()}")
+                continue
+            elif line.startswith('f '):  # face
+              try:
+                # Handle different face formats (v, v/vt, v/vt/vn)
+                face_indices = []
+                normal_indices = []
+                for idx in line.strip().split()[1:]:
+                  # Split by '/' and get vertex and normal indices
+                  parts = idx.split('/')
+                  if len(parts) >= 3:  # v/vt/vn format
+                    v_idx = parts[0]
+                    n_idx = parts[2] if len(parts) > 2 else None
+                    if v_idx:
+                      face_indices.append(int(v_idx) - 1)  # OBJ indices are 1-based
+                    if n_idx:
+                      normal_indices.append(int(n_idx) - 1)
+                  else:  # v format
+                    face_indices.append(int(parts[0]) - 1)
+                
+                if len(face_indices) >= 3:
+                  faces.append(face_indices[:3])  # use triangle only
+                  face_count += 1
+              except (ValueError, IndexError) as e:
+                print(f"Warning: Invalid face line: {line.strip()}")
+                continue
+        
+        vertices = np.array(vertices)
+        faces = np.array(faces)
+        
+        if len(vertices) == 0:
+          raise ValueError("No vertices found in OBJ file")
+        if len(faces) == 0:
+          raise ValueError("No faces found in OBJ file")
+          
+        return vertices, faces
   except Exception as e:
     print(f"Error loading OBJ file: {str(e)}")
     raise
 
-def __normalize_color(color):
-  return tuple(v / 255. for v in color)
-
 def __normal_to_color(normal):
-  """Convert a 3D normal vector to a BGR color.
-  Maps the normal direction to RGB color space where:
-  - Red represents X component
-  - Green represents Y component
-  - Blue represents Z component
-  """
-  # Map normal from [-1,1] to [0,1] range
-  color = (normal + 1) / 2
-  # Convert to BGR (OpenCV uses BGR)
-  return (int(color[2] * 255), int(color[1] * 255), int(color[0] * 255))
+    """
+    Convert a 3D normal vector to RGB color.
+    Convention:
+    - X: -1 to +1 : Red: 0 to 255 : left to right
+    - Y: -1 to +1 : Green: 0 to 255 : down to up
+    - Z: 0 to -1 : Blue: 128 to 255 : neutral to forward (towards camera)
+    
+    Args:
+        normal: 3D normal vector in XYZ format
+        
+    Returns:
+        tuple: (R, G, B) color values in range [0, 255]
+    """
+    from coordinate_utils import xyz_to_rgb
+    # Reshape normal to match expected format (1x3)
+    normal = normal.reshape(1, 3)
+    
+    # Convert XYZ to RGB
+    rgb = xyz_to_rgb(normal)
+    # Return as tuple
+    return tuple(rgb[0].astype(int))
 
 def create_normal_map(
     image: np.ndarray,
@@ -194,31 +191,41 @@ def create_normal_map(
     faces: np.ndarray,
     face_normals: np.ndarray,
     visible_faces: np.array,
-    alpha: float = 0.3
+    alpha: float = 0.3,
+    smooth_factor: float = 1.0
 ):
-  """Creates a normal map by determining which face is in the foreground for each pixel."""
+  """Creates a normal map by determining which face is in the foreground for each pixel.
+
+  Args:
+    image: Input image
+    vertices: 3D vertices
+    faces: Face indices
+    face_normals: Face normals
+    visible_faces: Indices of visible faces
+    alpha: Blending factor for visualization
+    smooth_factor: Amount of Gaussian blur to apply to the normal map (0.0 to disable)
+  """
   image_rows, image_cols, _ = image.shape
-  
+
   # Create a depth buffer and normal map
   depth_buffer = np.full((image_rows, image_cols), np.inf)
   normal_map = np.zeros((image_rows, image_cols, 3), dtype=np.uint8)
   
   # Get 2D vertices
   vertices_2d = vertices[:, :2].astype(np.int32)
-  
   # Process visible faces
   for face_idx in visible_faces:
     face = faces[face_idx]
     face_2d = vertices_2d[face]
-    
     # Skip faces outside the image bounds
     if not (np.all(face_2d[:, 0] >= 0) and np.all(face_2d[:, 0] < image_cols) and
             np.all(face_2d[:, 1] >= 0) and np.all(face_2d[:, 1] < image_rows)):
-        continue
+      continue
     
     # Get face normal and convert to color
     normal = face_normals[face_idx]
-    color = __normal_to_color(normal)
+    normal[2] = -normal[2]
+    color = coordinate_utils.xyz_to_rgb(normal.reshape(1, 3))[0].astype(int)
     
     # Find bounding box of the face
     min_x = max(0, np.min(face_2d[:, 0]))
@@ -242,9 +249,36 @@ def create_normal_map(
   # Create a mask of pixels that have a face
   mask = depth_buffer < np.inf
   
+  # Apply smoothing if enabled
+  if smooth_factor > 0:
+    # Convert to float for smoothing
+    normal_map_float = normal_map.astype(float)
+    
+    # Apply Gaussian blur to each channel separately
+    for c in range(3):
+      normal_map_float[..., c] = cv2.GaussianBlur(
+          normal_map_float[..., c],
+          (0, 0),  # Let OpenCV calculate kernel size
+          sigmaX=smooth_factor,
+          sigmaY=smooth_factor
+      )
+    
+    # Convert back to uint8
+    normal_map = normal_map_float.astype(np.uint8)
+    
+    # Ensure the smoothed normals are still normalized
+    # Convert to float for normalization
+    normal_map_float = normal_map.astype(float)
+    # Normalize each pixel
+    norm = np.sqrt(np.sum(normal_map_float**2, axis=2, keepdims=True))
+    normal_map_float = normal_map_float / (norm + 1e-6)
+    # Convert back to uint8
+    normal_map = (normal_map_float * 255).astype(np.uint8)
+  
   # Create a copy of the image for blending
   overlay = image.copy()
   overlay[mask] = normal_map[mask]
+  overlay = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
   cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0, image)
   
   return normal_map, mask
@@ -254,8 +288,9 @@ def draw_surface_normals(
     vertices: np.ndarray,
     faces: np.ndarray,
     landmark_coordinates: dict,
-    camera_position: np.ndarray = np.array([0, 0, 1]),
-    alpha: float = 0.5
+    camera_position: np.ndarray = np.array([0, 0, -1]),
+    alpha: float = 0.5,
+    smooth_factor: float = 1.0
 ):
   """Draws surface normals as colored faces on the image."""
   if image.shape[2] != _BGR_CHANNELS:
@@ -265,7 +300,7 @@ def draw_surface_normals(
   face_normals = []
   for face in faces:
     v1, v2, v3 = vertices[face]
-    face_normal = -np.cross(v2 - v1, v3 - v1)  # Invert normal
+    face_normal = -np.cross(v2 - v1, v3 - v1)
     face_normal /= np.linalg.norm(face_normal) + 1e-8  # Normalize
     face_normals.append(face_normal)
   face_normals = np.array(face_normals)
@@ -295,14 +330,200 @@ def draw_surface_normals(
   vertices_scaled[:, 2] = vertices[:, 2] * scale_x
   
   # Step 3: Determine visible faces
-  camera_direction = camera_position / (np.linalg.norm(camera_position) + 1e-8)
+  camera_direction = -camera_position / (np.linalg.norm(camera_position) + 1e-8)
   visibility = np.dot(face_normals, camera_direction)
   visible_faces = np.where(visibility > -0.8)[0]
   
   # Step 4: Create normal map
-  normal_map, mask = create_normal_map(image, vertices_scaled, faces, face_normals, visible_faces, alpha)
+  normal_map, mask = create_normal_map(
+      image,
+      vertices_scaled,
+      faces,
+      face_normals,
+      visible_faces,
+      alpha,
+      smooth_factor
+  )
   
   return normal_map, mask
+
+def create_blended_normal_map(
+    image,
+    landmark_list,
+    vertices,
+    faces,
+    obj_path,
+    smoothness=0.,
+    intensity=1.,
+    smooth_factor=1.0,
+    debug=False,
+    target_size=512
+):
+    """
+    Create a blended normal map by combining mesh-based and image-based normal maps.
+    All outputs are resized to target_size x target_size while maintaining aspect ratio.
+    
+    Args:
+        image: Input image
+        landmark_list: Face landmarks
+        vertices: 3D vertices from OBJ file
+        faces: Face indices from OBJ file
+        obj_path: Path to save OBJ file
+        smoothness: Gaussian blur smoothness for image-based normal map
+        intensity: Normal map intensity for image-based normal map
+        smooth_factor: Amount of Gaussian blur to apply to the mesh-based normal map
+        debug: If True, save intermediate normal maps for debugging
+        target_size: Size of the output square images (default: 512)
+        
+    Returns:
+        tuple: (blended_normal_map, mask, ao_map)
+    """
+    # Create a copy of the image to prevent modifying the original
+    image_copy = image.copy()
+    
+    # Create a dictionary mapping landmark indices to coordinates
+    image_rows, image_cols, _ = image_copy.shape
+    idx_to_coordinates = {}
+    for idx, landmark in enumerate(landmark_list.landmark):
+        if ((landmark.HasField('visibility') and
+             landmark.visibility < _VISIBILITY_THRESHOLD) or
+            (landmark.HasField('presence') and
+             landmark.presence < _PRESENCE_THRESHOLD)):
+            continue
+        landmark_px = __normalized_to_pixel_coordinates(landmark.x, landmark.y,
+                                                   image_cols, image_rows)
+        if landmark_px:
+            idx_to_coordinates[idx] = landmark_px
+    
+    # Create mesh-based normal map
+    mesh_normal_map, mesh_mask = draw_surface_normals(
+        image=image_copy,
+        vertices=vertices,
+        faces=faces,
+        landmark_coordinates=idx_to_coordinates,
+        smooth_factor=smooth_factor
+    )
+    
+    if debug:
+        # Save mesh-based normal map for debugging
+        cv2.imwrite('debug_mesh_normal_map.png', cv2.cvtColor(mesh_normal_map, cv2.COLOR_RGB2BGR))
+        # Debug coordinate conversions
+        from coordinate_utils import debug_coordinate_conversions
+        debug_coordinate_conversions(mesh_normal_map, mesh_mask)
+    
+    # Create temporary image file for normal_map_generator with only face pixels
+    temp_image_path = 'temp_face_image.png'
+    # Create a copy of the image
+    face_only_image = image.copy()
+    # Set all non-face pixels to black
+    face_only_image[~mesh_mask] = [0, 0, 0]
+    
+    # Get the bounding box of the face mask
+    y_indices, x_indices = np.where(mesh_mask)
+    y_min, y_max = np.min(y_indices), np.max(y_indices)
+    x_min, x_max = np.min(x_indices), np.max(x_indices)
+    
+    # Calculate the size of the square (use the larger dimension)
+    size = max(y_max - y_min, x_max - x_min)
+    
+    # Create a square image for the face data
+    face_square = np.zeros((size, size, 3), dtype=np.uint8)
+    
+    # Calculate the offset to center the face in the square
+    y_offset = (size - (y_max - y_min)) // 2
+    x_offset = (size - (x_max - x_min)) // 2
+    
+    # Copy the face data to the square image
+    face_square[y_offset:y_offset + (y_max - y_min), 
+                x_offset:x_offset + (x_max - x_min)] = face_only_image[y_min:y_max, x_min:x_max]
+    
+    # Resize face_square to target size
+    face_square = cv2.resize(face_square, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+    
+    if debug:
+        # Save the square face-only image for debugging
+        cv2.imwrite('debug_face_only_image.png', face_square)
+    
+    # Save the square face image as temporary file for normal_map_generator
+    cv2.imwrite(temp_image_path, face_square)
+    
+    # Convert mesh mask to binary format (0 or 255)
+    binary_mask = (mesh_mask * 255).astype(np.uint8)
+    
+    # Create square binary mask and resize to target size
+    square_binary_mask = np.zeros((size, size), dtype=np.uint8)
+    square_binary_mask[y_offset:y_offset + (y_max - y_min), 
+                      x_offset:x_offset + (x_max - x_min)] = binary_mask[y_min:y_max, x_min:x_max]
+    square_binary_mask = cv2.resize(square_binary_mask, (target_size, target_size), 
+                                  interpolation=cv2.INTER_NEAREST)
+    
+    # Generate image-based normal map using normal_map_generator
+    from normal_map_generator import startConvert
+    image_normal_map, ao_map = startConvert(
+        input_file=temp_image_path,
+        smooth=smoothness,
+        intensity=intensity,
+        mask=square_binary_mask
+    )
+    
+    if debug:
+        # Save image-based normal map for debugging
+        cv2.imwrite('debug_image_normal_map.png', image_normal_map)
+        cv2.imwrite('debug_ao_map.png', ao_map)
+        # Debug coordinate conversions for image-based normal map
+        # Convert square_binary_mask to boolean
+        square_mask = square_binary_mask.astype(bool)
+        debug_coordinate_conversions(image_normal_map, square_mask)
+    
+    # Create a square mesh normal map
+    square_mesh_normal = np.zeros((size, size, 3), dtype=np.uint8)
+    square_mesh_normal[y_offset:y_offset + (y_max - y_min), 
+                      x_offset:x_offset + (x_max - x_min)] = mesh_normal_map[y_min:y_max, x_min:x_max]
+    
+    # Resize mesh normal map to target size
+    square_mesh_normal = cv2.resize(square_mesh_normal, (target_size, target_size), 
+                                  interpolation=cv2.INTER_LINEAR)
+    
+    if debug:
+        cv2.imwrite('debug_square_mesh_normal.png', cv2.cvtColor(square_mesh_normal, cv2.COLOR_RGB2BGR))
+    
+    # Create blending weights
+    mesh_weight = np.mean(np.abs(image_normal_map - 127.5), axis=2) / 127.5
+    mesh_weight = np.clip(mesh_weight * 2, 0, 1)  # Amplify the weight
+    mesh_weight = np.stack([mesh_weight] * 3, axis=2)
+    
+    # Blend the normal maps (now they have the same dimensions)
+    blended_normal_map = (
+        cv2.cvtColor(square_mesh_normal, cv2.COLOR_RGB2BGR) * (1-mesh_weight) +
+        image_normal_map * mesh_weight
+    ).astype(np.uint8)
+    
+    # Create a black background
+    black_background = np.zeros_like(blended_normal_map)
+    
+    # Create square mask for the blended normal map
+    square_mask = square_binary_mask.astype(bool)
+    
+    # Apply the mask to keep only the face region
+    blended_normal_map = np.where(
+        square_mask[..., np.newaxis],  # Expand mask to 3 channels
+        blended_normal_map,
+        black_background
+    )
+    
+    if debug:
+        # Save blended normal map for debugging
+        cv2.imwrite('debug_blended_normal_map.png', blended_normal_map)
+        # Save the square face image for debugging
+        cv2.imwrite('debug_face_square.png', face_square)
+        # Debug coordinate conversions for both images
+        debug_coordinate_conversions(blended_normal_map, square_mask)
+    
+    # Clean up temporary files
+    import os
+    os.remove(temp_image_path)
+    
+    return blended_normal_map, square_mask, ao_map
 
 def draw_landmarks(
     image: np.ndarray,
@@ -333,7 +554,7 @@ def draw_landmarks(
          landmark.presence < _PRESENCE_THRESHOLD)):
       continue
     landmark_px = __normalized_to_pixel_coordinates(landmark.x, landmark.y,
-                                                  image_cols, image_rows)
+                                                   image_cols, image_rows)
     if landmark_px:
       idx_to_coordinates[idx] = landmark_px
       idx_to_z[idx] = landmark.z
@@ -345,32 +566,40 @@ def draw_landmarks(
   if obj_path:
     try:
       vertices, faces = __load_obj_vertices_faces(obj_path)
-      normal_map, mask = draw_surface_normals(image, vertices, faces, idx_to_coordinates)
+      blended_normal_map, mask, ao_map = create_blended_normal_map(
+          image=image,
+          landmark_list=landmark_list,
+          vertices=vertices,
+          faces=faces,
+          obj_path=obj_path,
+          debug=True  # Set to False in production
+      )
       
       print(f"\nDebug shapes:")
       print(f"Image shape: {image.shape}")
-      print(f"Normal map shape: {normal_map.shape}")
+      print(f"Normal map shape: {blended_normal_map.shape}")
       print(f"Mask shape: {mask.shape}")
       print(f"Number of valid pixels: {np.sum(mask)}")
       
       # Only proceed with lighting estimation if we have valid pixels
       if mask.any():
         try:
-          from lighting_utils import estimate_lighting, calculate_lighting_from_normals
+          from lighting_utils import estimate_lighting, calculate_lighting_from_normals, visualize_single_sphere
+          
+          num_bands = 2
           
           # Estimate lighting coefficients
-          lighting_coeffs = estimate_lighting(normal_map, mask)
+          lighting_coeffs, lighting_map,Y = estimate_lighting(blended_normal_map, mask, num_bands, True)
+
+          # Get single sphere visualization with custom lighting coefficients
+          sphere_vis = visualize_single_sphere(lighting_coeffs)
+          cv2.imwrite('sphere_visualization.png', sphere_vis)
           
           # Calculate lighting map
-          lighting_map = calculate_lighting_from_normals(normal_map, lighting_coeffs, mask)
+          lighting_map = calculate_lighting_from_normals(blended_normal_map, lighting_coeffs, mask, num_bands, Y)
           
           # Save or display the lighting map
           cv2.imwrite('lighting_map.png', lighting_map)
-          
-          # Optionally, create a colored visualization
-          lighting_rgb = cv2.cvtColor(lighting_map, cv2.COLOR_GRAY2BGR)
-          cv2.imwrite('lighting_map_colored.png', lighting_rgb)
-          
         except ImportError:
           print("Warning: lighting_utils not found. Lighting calculation skipped.")
         except Exception as e:
@@ -388,89 +617,32 @@ def draw_landmarks(
 
   # Draw connections
   if connections:
-    num_landmarks = len(landmark_list.landmark)
-    for connection in connections:
-      start_idx, end_idx = connection
-      if not (0 <= start_idx < num_landmarks and 0 <= end_idx < num_landmarks):
-        raise ValueError(f'Invalid connection from landmark #{start_idx} to #{end_idx}.')
+      num_landmarks = len(landmark_list.landmark)
+      for connection in connections:
+          start_idx, end_idx = connection
+          if not (0 <= start_idx < num_landmarks and 0 <= end_idx < num_landmarks):
+              raise ValueError(f'Invalid connection from landmark #{start_idx} to #{end_idx}.')
 
-      if (start_idx in idx_to_coordinates and end_idx in idx_to_coordinates):
-        drawing_spec = connection_drawing_spec[connection] if isinstance(
-            connection_drawing_spec, Mapping) else connection_drawing_spec
-        cv2.line(
-            image,
-            idx_to_coordinates[start_idx],
-            idx_to_coordinates[end_idx],
-            drawing_spec.color,
-            drawing_spec.thickness,
-        )
+          if (start_idx in idx_to_coordinates and end_idx in idx_to_coordinates):
+              drawing_spec = connection_drawing_spec[connection] if isinstance(
+                  connection_drawing_spec, Mapping) else connection_drawing_spec
+              cv2.line(
+                  image,
+                  idx_to_coordinates[start_idx],
+                  idx_to_coordinates[end_idx],
+                  drawing_spec.color,
+                  drawing_spec.thickness,
+              )
 
   # Draw landmarks
   if is_drawing_landmarks and landmark_drawing_spec:
-    for idx, landmark_px in idx_to_coordinates.items():
-      drawing_spec = landmark_drawing_spec[idx] if isinstance(
-          landmark_drawing_spec, Mapping) else landmark_drawing_spec
-      grayscale = __get_grayscale_from_depth(idx_to_z[idx],min(idx_to_z.values()),max(idx_to_z.values()))
-      circle_border_radius = max(drawing_spec.circle_radius + 1,
-                                int(drawing_spec.circle_radius * 1.2))
-      cv2.circle(image, landmark_px, circle_border_radius, grayscale,
-                drawing_spec.thickness)
-      cv2.circle(image, landmark_px, drawing_spec.circle_radius,
-                grayscale, drawing_spec.thickness)
-
-def plot_landmarks(landmark_list: Any,
-                   connections: Optional[List[Tuple[int, int]]] = None,
-                   landmark_drawing_spec: DrawingSpec = DrawingSpec(
-                       color=RED_COLOR, thickness=5),
-                   connection_drawing_spec: DrawingSpec = DrawingSpec(
-                       color=BLACK_COLOR, thickness=5),
-                   elevation: int = 10,
-                   azimuth: int = 10):
-  """Plot the landmarks and the connections in matplotlib 3d.
-
-  Args:
-    landmark_list: A normalized landmark list proto message to be plotted.
-    connections: A list of landmark index tuples that specifies how landmarks to
-      be connected.
-    landmark_drawing_spec: A DrawingSpec object that specifies the landmarks'
-      drawing settings such as color and line thickness.
-    connection_drawing_spec: A DrawingSpec object that specifies the
-      connections' drawing settings such as color and line thickness.
-    elevation: The elevation from which to view the plot.
-    azimuth: the azimuth angle to rotate the plot.
-  """
-  if not landmark_list:
-    return
-  plt.figure(figsize=(10, 10))
-  ax = plt.axes(projection='3d')
-  ax.view_init(elev=elevation, azim=azimuth)
-  
-  plotted_landmarks = {}
-  for idx, landmark in enumerate(landmark_list.landmark):
-    if ((landmark.HasField('visibility') and
-         landmark.visibility < _VISIBILITY_THRESHOLD) or
-        (landmark.HasField('presence') and
-         landmark.presence < _PRESENCE_THRESHOLD)):
-      continue
-    ax.scatter3D(
-        xs=[-landmark.z],
-        ys=[landmark.x],
-        zs=[-landmark.y],
-        color=__normalize_color(landmark_drawing_spec.color[::-1]),
-        linewidth=landmark_drawing_spec.thickness)
-    plotted_landmarks[idx] = (-landmark.z, landmark.x, -landmark.y)
-
-  if connections:
-    num_landmarks = len(landmark_list.landmark)
-    for connection in connections:
-      start_idx, end_idx = connection
-      if (0 <= start_idx < num_landmarks and 0 <= end_idx < num_landmarks and
-          start_idx in plotted_landmarks and end_idx in plotted_landmarks):
-        landmark_pair = [plotted_landmarks[start_idx], plotted_landmarks[end_idx]]
-        ax.plot3D(
-            xs=[landmark_pair[0][0], landmark_pair[1][0]],
-            ys=[landmark_pair[0][1], landmark_pair[1][1]],
-            zs=[landmark_pair[0][2], landmark_pair[1][2]],
-            color=__normalize_color(connection_drawing_spec.color[::-1]),
-            linewidth=connection_drawing_spec.thickness)
-  plt.show()
+      for idx, landmark_px in idx_to_coordinates.items():
+          drawing_spec = landmark_drawing_spec[idx] if isinstance(
+              landmark_drawing_spec, Mapping) else landmark_drawing_spec
+          grayscale = __get_grayscale_from_depth(idx_to_z[idx],min(idx_to_z.values()),max(idx_to_z.values()))
+          circle_border_radius = max(drawing_spec.circle_radius + 1,
+                                    int(drawing_spec.circle_radius * 1.2))
+          cv2.circle(image, landmark_px, circle_border_radius, grayscale,
+                    drawing_spec.thickness)
+          cv2.circle(image, landmark_px, drawing_spec.circle_radius,
+                    grayscale, drawing_spec.thickness)
