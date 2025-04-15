@@ -1,8 +1,5 @@
 # Training settings
-train_images: data/images
-embedding_dir: embeddings/faces
-normal_map_dir: data/normal_maps
-lighting_coeff_dir: data/lighting_coeffs
+base_dir: data/characters  # Base directory for character data
 
 # Output
 output_dir: models/lora_weights

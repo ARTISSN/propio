@@ -6,6 +6,8 @@ from pathlib import Path
 import argparse
 from typing import Dict, List, Optional
 import mediapipe as mp
+import datetime
+import scripts.train_lora as train_lora
 from utils.mesh_utils import generate_face_mesh, generate_normal_maps
 from utils.lighting_utils import LightingProcessor, calculate_lighting_coefficients
 
@@ -68,30 +70,57 @@ class CharacterPipeline:
         with open(self.metadata_path, 'w') as f:
             json.dump(self.metadata, f, indent=2)
 
-    def process_source_videos(self):
-        """Process source videos to extract frames and face data."""
-        video_dir = self.char_path / "source/videos"
-        if not video_dir.exists():
-            print(f"No videos found for {self.character_name}")
-            return
+    def _migrate_to_new_format(self):
+        """Migrate old metadata format to new format."""
+        new_metadata = {
+            "character_name": self.metadata["character_name"],
+            "source_info": self.metadata["source_info"],
+            "frames": {}
+        }
 
-        # TODO: Implement video processing
-        # - Extract frames
-        # - Detect faces
-        # - Generate embeddings
-        pass
+        # Merge existing data into new format
+        mesh_params = self.metadata.get("mesh_parameters", {})
+        processed = self.metadata.get("processed_frames", {})
+        history = self.metadata.get("processing_history", [])
 
-    def process_source_images(self):
-        """Process source images to extract face data."""
-        image_dir = self.char_path / "source/images"
-        if not image_dir.exists():
-            print(f"No images found for {self.character_name}")
-            return
+        # Create unified frame entries
+        for frame_id in set(list(mesh_params.keys()) + list(processed.keys())):
+            frame_data = {"processing_steps": []}
+            
+            # Add mesh data if exists
+            if frame_id in mesh_params:
+                mesh_info = mesh_params[frame_id]
+                frame_data["source_image"] = mesh_info["source_image"]
+                frame_data["mesh"] = {
+                    "path": mesh_info["obj_path"],
+                    "generated_at": None  # Will be updated from history
+                }
 
-        # TODO: Implement image processing
-        # - Detect faces
-        # - Generate embeddings
-        pass
+            # Add processed data if exists
+            if frame_id in processed:
+                proc_info = processed[frame_id]
+                frame_data["maps"] = {
+                    "face": proc_info.get("face_map"),
+                    "normal": proc_info.get("normal_map"),
+                    "generated_at": proc_info.get("timestamp")
+                }
+                if "lighting_coefficients" in proc_info:
+                    frame_data["lighting"] = {
+                        "coefficients": proc_info["lighting_coefficients"],
+                        "generated_at": proc_info.get("timestamp")
+                    }
+
+            # Add relevant history entries
+            for entry in history:
+                if entry.get("frame") == frame_id:
+                    frame_data["processing_steps"].append({
+                        "type": entry["type"],
+                        "timestamp": entry["timestamp"]
+                    })
+
+            new_metadata["frames"][frame_id] = frame_data
+
+        self.metadata = new_metadata
 
     def generate_mesh(self):
         """Generate 3D mesh and normal maps from processed images."""
@@ -152,6 +181,7 @@ class CharacterPipeline:
         """Generate texture and normal maps, and calculate lighting coefficients."""
         print(f"Generating maps and calculating lighting for {self.character_name}")
         
+        # Set up directories
         processed_dir = self.char_path / "processed"
         mesh_dir = processed_dir / "meshes"
         maps_dir = processed_dir / "maps"
@@ -164,17 +194,67 @@ class CharacterPipeline:
         
         # Initialize lighting processor
         lighting_processor = LightingProcessor(self.base_path, self.character_name)
-
-        # Process each mesh in the metadata
-        for base_name, mesh_info in self.metadata["mesh_parameters"].items():
-            try:
-                # Reconstruct mesh data
-                obj_path = self.base_path / mesh_info["obj_path"]
-                source_image = self.char_path / "source/images" / mesh_info["source_image"]
+        
+        # Find all mesh files that need processing
+        mesh_files = list(mesh_dir.glob("*.obj"))
+        if not mesh_files:
+            print("No mesh files found to process")
+            return
+        
+        # Check which meshes need map generation by comparing with existing maps
+        frames_to_process = {}
+        for mesh_path in mesh_files:
+            base_name = mesh_path.stem
+            face_map = faces_dir / f"{base_name}.png"
+            normal_map = normals_dir / f"{base_name}.png"
+            
+            # If either map is missing, we need to process this frame
+            if not face_map.exists() or not normal_map.exists():
+                # Find corresponding source image
+                expression = base_name.split('_')[0] if '_' in base_name else ''
+                source_image = None
                 
-                if not obj_path.exists() or not source_image.exists():
-                    print(f"Missing files for {base_name}, skipping...")
-                    continue
+                # Look for source image in metadata first
+                if (expression in self.metadata["frames"] and 
+                    base_name in self.metadata["frames"][expression] and 
+                    "source_image" in self.metadata["frames"][expression][base_name]):
+                    source_path = self.base_path / self.metadata["frames"][expression][base_name]["source_image"]
+                    if source_path.exists():
+                        source_image = source_path
+                
+                # If not found in metadata, look in source directory
+                if not source_image:
+                    source_dir = self.char_path / "source/images"
+                    if expression:
+                        source_dir = source_dir / expression
+                    
+                    # Look for matching source image with any supported extension
+                    for ext in ['.jpg', '.jpeg', '.png']:
+                        potential_source = source_dir / f"{base_name}{ext}"
+                        if potential_source.exists():
+                            source_image = potential_source
+                            break
+                
+                if source_image:
+                    frames_to_process[base_name] = {
+                        "mesh_path": mesh_path,
+                        "source_image": source_image
+                    }
+                else:
+                    print(f"Warning: Could not find source image for mesh {base_name}")
+        
+        if not frames_to_process:
+            print("No new frames to process for map generation")
+            return
+        
+        print(f"Processing maps for {len(frames_to_process)} frames...")
+        
+        # Process each frame
+        for frame_id, frame_data in frames_to_process.items():
+            try:
+                # Get paths
+                obj_path = frame_data["mesh_path"]
+                source_image = frame_data["source_image"]
                 
                 # Read the source image
                 image = cv2.imread(str(source_image))
@@ -182,13 +262,14 @@ class CharacterPipeline:
                     print(f"Failed to read image: {source_image}")
                     continue
                 
-                # Get landmarks and generate maps
+                # Initialize face mesh to get landmarks
                 with mp.solutions.face_mesh.FaceMesh(
                     static_image_mode=True,
                     max_num_faces=1,
                     refine_landmarks=True,
                     min_detection_confidence=0.5
                 ) as face_mesh:
+                    # Get landmarks
                     results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
                     if not results.multi_face_landmarks:
                         print(f"No face detected in: {source_image}")
@@ -202,41 +283,66 @@ class CharacterPipeline:
                     'landmarks': landmarks
                 }
                 
-                map_data = generate_normal_maps(mesh_data, str(maps_dir))
+                timestamp = datetime.datetime.now().isoformat()
                 
-                # Process lighting
+                # Generate normal maps and face cutouts
+                map_data = generate_normal_maps(mesh_data, str(maps_dir))
+                if not map_data:
+                    print(f"Failed to generate maps for frame {frame_id}")
+                    continue
+                
+                # Process lighting coefficients
                 lighting_data = lighting_processor.process_frame(
-                    base_name,
+                    frame_id,
                     Path(map_data['face_path']),
                     Path(map_data['normal_path'])
                 )
                 
-                if lighting_data:
-                    # Update metadata with all information for this frame
-                    frame_data = {
-                        "source_image": str(Path(source_image).relative_to(self.base_path)),
-                        "mesh": str(Path(obj_path).relative_to(self.base_path)),
-                        "face_map": lighting_data["face_map"],
-                        "normal_map": lighting_data["normal_map"],
-                        "lighting_coefficients": lighting_data["lighting_coefficients"],
-                        "timestamp": lighting_data["timestamp"]
+                if not lighting_data:
+                    print(f"Failed to calculate lighting for frame {frame_id}")
+                    continue
+            
+                # Update metadata
+                expression = frame_id.split('_')[0] if '_' in frame_id else ''
+                if expression not in self.metadata["frames"]:
+                    self.metadata["frames"][expression] = {}
+                
+                if frame_id not in self.metadata["frames"][expression]:
+                    self.metadata["frames"][expression][frame_id] = {
+                        "source_image": str(source_image.relative_to(self.base_path)),
+                        "processing_steps": []
                     }
-                    
-                    self.metadata["processed_frames"][base_name] = frame_data
-                    
-                    # Add to processing history
-                    self.metadata["processing_history"].append({
-                        "type": "map_and_lighting_generation",
-                        "frame": base_name,
-                        "timestamp": lighting_data["timestamp"]
-                    })
+                
+                # Update metadata with new data
+                self.metadata["frames"][frame_id].update({
+                    "maps": {
+                        "face": str(Path(map_data['face_path']).relative_to(self.base_path)),
+                        "normal": str(Path(map_data['normal_path']).relative_to(self.base_path)),
+                        "generated_at": timestamp
+                    },
+                    "lighting": {
+                        "coefficients": lighting_data["lighting_coefficients"],
+                        "generated_at": timestamp
+                    }
+                })
+                
+                # Add processing step to history
+                self.metadata["frames"][frame_id]["processing_steps"].append({
+                    "type": "map_and_lighting_generation",
+                    "timestamp": timestamp
+                })
+                
+                # Save metadata after each successful frame processing
+                self.save_metadata()
+                
+                print(f"Successfully processed maps and lighting for frame {frame_id}")
                 
             except Exception as e:
-                print(f"Error processing {base_name}: {str(e)}")
+                print(f"Error processing frame {frame_id}: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 continue
         
-        # Save updated metadata
-        self.save_metadata()
         print(f"Map and lighting generation completed for {self.character_name}")
 
 def main():
@@ -254,12 +360,14 @@ def main():
     pipeline = CharacterPipeline(args.character, args.base_path)
     
     # If no specific steps are specified, run all steps
-    run_all = args.all or not (args.mesh or args.maps)
+    run_all = args.all or not (args.mesh or args.maps or args.train)
     
     if args.mesh or run_all:
         pipeline.generate_mesh()
     if args.maps or run_all:
         pipeline.generate_maps()
+    if args.train or run_all:
+        train_lora.main(args.character)  # Pass character name to training
 
 if __name__ == "__main__":
     main()

@@ -112,9 +112,9 @@ def generate_face_mesh(image_path, output_dir, face_mesh):
 def generate_normal_maps(mesh_data, output_dir):
     """Generate face cutout and normal maps from mesh data."""
     base_name = Path(mesh_data['obj_path']).stem
-    face_output_path = os.path.join(output_dir, f"{base_name}.png")
-    normal_output_path = os.path.join(output_dir, f"{base_name}_normal.png")
-    ao_output_path = os.path.join(output_dir, f"{base_name}_ao.png")
+    face_output_path = os.path.join(f"{output_dir}/faces", f"{base_name}.png")
+    normal_output_path = os.path.join(f"{output_dir}/normals", f"{base_name}.png")
+    ao_output_path = os.path.join(f"{output_dir}/ao", f"{base_name}_ao.png")
     
     # Draw landmarks and generate normal map
     annotated_image = mesh_data['image'].copy()
@@ -135,8 +135,10 @@ def generate_normal_maps(mesh_data, output_dir):
     # Save the maps directly
     cv2.imwrite(face_output_path, face_image)
     cv2.imwrite(normal_output_path, normal_map)
-    if ao_map is not None:
-        cv2.imwrite(ao_output_path, ao_map)
+
+    # Uncomment for AO maps
+    #if ao_map is not None:
+    #    cv2.imwrite(ao_output_path, ao_map)
     
     return {
         'face_path': face_output_path,

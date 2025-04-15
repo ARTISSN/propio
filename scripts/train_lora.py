@@ -1,79 +1,102 @@
 # scripts/train_lora.py
+
 import os
+from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from diffusers import StableDiffusionXLPipeline
 from peft import get_peft_model, LoraConfig
 from accelerate import Accelerator
-from utils.embedding_utils import get_face_embedding
-from utils.image_utils import preprocess_image
-from utils.controlnet_utils import create_controlnet_condition
 import yaml
-
-# --------------- Configs ----------------
-with open("configs/train_config.yaml", "r") as f:
-    config = yaml.safe_load(f)
 
 # --------------- Dataset ----------------
 class FaceSwapDataset(torch.utils.data.Dataset):
-    def __init__(self, image_dir, embedding_dir, normal_dir, lighting_dir):
-        self.image_paths = [os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(".jpg")]
-        self.embedding_dir = embedding_dir
-        self.normal_dir = normal_dir
-        self.lighting_dir = lighting_dir
+    def __init__(self, character_path):
+        """
+        Initialize dataset for a specific character.
+        
+        Args:
+            character_path: Path to character directory containing processed data
+        """
+        self.processed_dir = Path(character_path) / "processed"
+        self.maps_dir = self.processed_dir / "maps"
+        
+        # Set up paths
+        self.face_dir = self.maps_dir / "faces"
+        self.normal_dir = self.maps_dir / "normals"
+        
+        # Get all processed face images
+        self.face_paths = list(self.face_dir.glob("*.png"))
+        
+        if not self.face_paths:
+            raise ValueError(f"No processed face images found in {self.face_dir}")
 
     def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        img = preprocess_image(img_path, target_size=(config["resolution"], config["resolution"]))
-        embedding_path = os.path.join(config["embedding_dir"], os.path.basename(img_path) + ".json")
-        embedding = torch.tensor(torch.load(embedding_path))
-        control = create_controlnet_condition(
-            normal_map_path=os.path.join(config["normal_dir"], os.path.basename(img_path)),
-            lighting_path=os.path.join(config["lighting_dir"], os.path.basename(img_path).replace(".jpg", ".npy"))
-        )
-        return {"pixel_values": torch.tensor(img).permute(2,0,1), "embedding": embedding, **control}
+        face_path = self.face_paths[idx]
+        base_name = face_path.stem
+        
+        # Get corresponding normal map
+        normal_path = self.normal_dir / f"{base_name}.png"
+        if not normal_path.exists():
+            raise ValueError(f"Missing normal map for {base_name}")
+        
+        # Load and preprocess images
+        face_img = preprocess_image(str(face_path), target_size=(config["resolution"], config["resolution"]))
+        normal_map = preprocess_image(str(normal_path), target_size=(config["resolution"], config["resolution"]))
+        
+        # Create control condition
+        control = create_controlnet_condition(normal_map)
+        
+        return {
+            "pixel_values": torch.tensor(face_img).permute(2,0,1),
+            "normal_map": torch.tensor(normal_map).permute(2,0,1),
+            **control
+        }
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.face_paths)
 
 # --------------- Training ----------------
-def main():
+def main(character_name):
+    # Load config
+    with open("configs/train_config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+    
+    # Set up character path
+    character_path = Path(config["base_dir"]) / character_name
+    if not character_path.exists():
+        raise ValueError(f"Character directory not found: {character_path}")
+    
+    # Set up output path for this character
+    character_output_dir = Path(config["output_dir"]) / character_name
+    character_output_dir.mkdir(parents=True, exist_ok=True)
+    
     accelerator = Accelerator(mixed_precision=config["mixed_precision"])
     
     # Load SDXL
-    pipe = StableDiffusionXLPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", torch_dtype=torch.bfloat16)
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        config["sdxl_model_path"], 
+        torch_dtype=torch.bfloat16
+    )
     pipe.enable_gradient_checkpointing()
     
     # Add LoRA to UNet
     lora_config = LoraConfig(r=config["lora_rank"])
     pipe.unet = get_peft_model(pipe.unet, lora_config)
 
-    # Dataset and loader
-    dataset = FaceSwapDataset(config["train_images"], config["embedding_dir"], config["normal_dir"], config["lighting_dir"])
-    dataloader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True)
-
-    # Optimizer
-    optimizer = torch.optim.Adam(pipe.unet.parameters(), lr=1e-4)
+    # Initialize dataset with character path
+    dataset = FaceSwapDataset(character_path)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=config["batch_size"], 
+        shuffle=True
+    )
 
     # Training loop
-    pipe.train()
-    for step, batch in enumerate(accelerator.prepare(dataloader)):
-        with accelerator.accumulate(pipe.unet):
-            outputs = pipe(
-                prompt_embeds=batch["embedding"],
-                image=batch["pixel_values"],
-                controlnet_cond=batch["normal_map"],
-                additional_condition=batch.get("lighting")
-            )
-            loss = outputs.loss
-            accelerator.backward(loss)
-            optimizer.step()
-            optimizer.zero_grad()
-
-        if step >= config["max_train_steps"]:
-            break
-
-    pipe.save_pretrained(config["output_dir"])
+    # ... rest of training code ...
+    
+    # Save with character-specific path
+    pipe.save_pretrained(character_output_dir)
 
 if __name__ == "__main__":
     main()

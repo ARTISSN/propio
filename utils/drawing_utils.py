@@ -357,7 +357,7 @@ def create_blended_normal_map(
     intensity=1.,
     smooth_factor=1.0,
     debug=False,
-    target_size=512
+    target_size=1024
 ):
     """
     Create a blended normal map by combining mesh-based and image-based normal maps.
