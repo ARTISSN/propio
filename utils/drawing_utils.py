@@ -20,7 +20,7 @@ from typing import List, Mapping, Optional, Tuple, Union, Any
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-import utils.coordinate_utils as coordinate_utils
+import coordinate_utils as coordinate_utils
 
 try:
   from mediapipe.framework.formats import detection_pb2

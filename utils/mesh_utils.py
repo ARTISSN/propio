@@ -6,8 +6,9 @@ import trimesh
 import pyvista as pv
 import os
 import argparse
+import opencv_brightness as cvb
 from pathlib import Path
-import utils.drawing_utils as mp_drawing
+import drawing_utils as mp_drawing
 
 mp_drawing_styles = mp.solutions.drawing_styles
 mp_face_mesh = mp.solutions.face_mesh
@@ -147,7 +148,7 @@ def generate_normal_maps(mesh_data, output_dir):
         'mask': mask  # Return the mask in case it's needed later
     }
 
-def process_image(image_path, output_dir, face_mesh):
+def process_image(image_path, ref_brightness, output_dir, face_mesh):
     """Process a single image and save its face cutout and normal map."""
     # Create output paths
     base_name = Path(image_path).stem
@@ -157,6 +158,8 @@ def process_image(image_path, output_dir, face_mesh):
     
     # Read and process image
     image = cv2.imread(image_path)
+    #reference image
+    ref_image = cv2.imread(ref_brightness)
     if image is None:
         print(f"Failed to read image: {image_path}")
         return None
@@ -165,12 +168,65 @@ def process_image(image_path, output_dir, face_mesh):
     - brighten image
     - crop image to face (call face_mesh.process(image) x2)
     """
+    
+    #SAVE PATH IS JUST FOR VIEWING THE IMAGES AFTER THEY'VE BEEN BRIGHTENED
+    #YOU CAN PASS THROUGH THE HISTOGRAM FUNCTION IF YOU WANT TO SAVE THE IMAGES ON YOUR COMPUTER BUT YOU DON'T HAVE TO
+    #save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_img_brigthness/' + base_name
+    image = cvb.match_histogram_lab(image, ref_image)
 
     # Convert the BGR image to RGB before processing
     results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
 
     if not results.multi_face_landmarks:
         print(f"No face detected in: {image_path}")
+        return None
+
+    # Process the first face found
+    face_landmarks = results.multi_face_landmarks[0]
+
+    #find the max x and y of the landmarks for bounding and cropping
+    min_x = min_y = float("inf")
+    max_x = max_y = float("-inf")
+    for lm in face_landmarks.landmark:
+        x = lm.x
+        y = lm.y
+
+        if x < min_x:
+            min_x = x
+            leftmost = lm
+        if x > max_x:
+            max_x = x
+            rightmost = lm
+        if y < min_y:
+            min_y = y
+            topmost = lm
+        if y > max_y:
+            max_y = y
+            bottommost = lm
+
+    #since mediapipe coordinates are normalized between 0 and 1, we need to multiply by width and height to find pixels
+    h = image.shape[0]
+    w = image.shape[1]
+
+    left = int(leftmost.x * w)
+    right = int(rightmost.x * w)
+    top = int(topmost.y * h)
+    bottom = int(bottommost.y * h)
+
+    #now we crop it with padding which can be whatever we want
+    padding = 100
+    image = image[top - padding:bottom + padding, left - padding:right+padding]
+
+   #save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_crop/' + base_name
+    #if you want to look at the cropped images
+    #cv2.imwrite(save_path + '.png', image)
+
+    #now we have the cropped image so just do face detection again
+    # Convert the BGR image to RGB before processing
+    results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+
+    if not results.multi_face_landmarks:
+        print(f"No face detected in: {image_path} cropped")
         return None
 
     # Process the first face found
@@ -218,18 +274,21 @@ def process_directory(input_dir, output_dir):
         print(f"No image files found in {input_dir}")
         return
     
+    #reference image at full brightness (frame 200)
+    refer_img = image_files[200]
+
     # Initialize face mesh
     with mp_face_mesh.FaceMesh(
         static_image_mode=True,
         max_num_faces=1,
         refine_landmarks=True,
-        min_detection_confidence=0.5) as face_mesh:
+        min_detection_confidence=0.3) as face_mesh:
         
         # Process each image
         for idx, image_path in enumerate(image_files):
-            print(f"Processing image {idx + 1}/{len(image_files)}: {image_path}")
+            (f"Processing image {idx + 1}/{len(image_files)}: {image_path}")
             try:
-                process_image(str(image_path), output_dir, face_mesh)
+                process_image(str(image_path), str(refer_img), output_dir, face_mesh)
             except Exception as e:
                 print(f"Error processing {image_path}: {str(e)}")
                 continue
