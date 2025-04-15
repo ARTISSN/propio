@@ -1,0 +1,557 @@
+{
+  "character_name": "daniel",
+  "source_info": {
+    "videos": [],
+    "images": []
+  },
+  "processed_frames": {
+    "anger": {
+      "source_image": "characters\\daniel\\source\\images\\anger.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\anger.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\anger.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\anger_normal.png",
+      "lighting_coefficients": [
+        -1.3642271463776876e-15,
+        -2.7656209501478592,
+        5.032078458211784,
+        2.7656209501481386,
+        -4.061420841929855,
+        3.6634200744709156,
+        3.5609623178382055,
+        -3.6634200744709142,
+        -4.0614208419299205,
+        0.0571297321100072,
+        1.690684869988598,
+        -1.7450020659838108,
+        -3.3565774598678604,
+        1.745002065983876,
+        1.690684869988317,
+        -0.057129732110023444
+      ],
+      "timestamp": "2025-04-14T15:55:02.712603"
+    },
+    "annoyed": {
+      "source_image": "characters\\daniel\\source\\images\\annoyed.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\annoyed.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\annoyed.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\annoyed_normal.png",
+      "lighting_coefficients": [
+        -1.1029852759477854e-17,
+        11.656342407286626,
+        8.786099113021479,
+        -11.656342407286093,
+        2.031307015813729,
+        -8.804739634910765,
+        7.058543188765927,
+        8.804739634910284,
+        2.031307015813866,
+        -0.10246642946702096,
+        -1.0522149261547433,
+        2.17432377226742,
+        -6.001460393219841,
+        -2.174323772266347,
+        -1.0522149261546807,
+        0.10246642946704933
+      ],
+      "timestamp": "2025-04-14T15:55:03.986493"
+    },
+    "annoyed2": {
+      "source_image": "characters\\daniel\\source\\images\\annoyed2.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\annoyed2.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\annoyed2.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\annoyed2_normal.png",
+      "lighting_coefficients": [
+        -5.749231522655468e-16,
+        4.4794174643990186,
+        7.557746940429624,
+        -4.4794174643990585,
+        -1.8067127042246562,
+        -2.586404864054215,
+        6.0231278607044745,
+        2.5864048640543205,
+        -1.8067127042246351,
+        0.02148415052968201,
+        0.7349960587862101,
+        0.15938961972609197,
+        -5.062551770392696,
+        -0.1593896197265637,
+        0.7349960587862233,
+        -0.021484150529383725
+      ],
+      "timestamp": "2025-04-14T15:55:05.272611"
+    },
+    "anxious": {
+      "source_image": "characters\\daniel\\source\\images\\anxious.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\anxious.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\anxious.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\anxious_normal.png",
+      "lighting_coefficients": [
+        1.1124071070200126e-15,
+        -18.32737900180281,
+        2.2434974809840966,
+        18.327379001801294,
+        -2.856380355106355,
+        16.48675790240563,
+        0.6805843273765548,
+        -16.48675790240407,
+        -2.8563803551051064,
+        0.027339690277260225,
+        1.146784030779172,
+        -5.3775725068263345,
+        -1.4827672574778328,
+        5.37757250682552,
+        1.1467840307793986,
+        -0.027339690277612252
+      ],
+      "timestamp": "2025-04-14T15:55:06.586499"
+    },
+    "childanger2": {
+      "source_image": "characters\\daniel\\source\\images\\childanger2.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\childanger2.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\childanger2.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\childanger2_normal.png",
+      "lighting_coefficients": [
+        -2.5323392874444548e-17,
+        -16.14981586227608,
+        1.3571937464809822,
+        16.14981586227817,
+        -3.804455460134082,
+        14.484414791276944,
+        -0.11789677131034072,
+        -14.48441479127601,
+        -3.8044554601355554,
+        0.14876863060409462,
+        1.5238002149661234,
+        -4.705041278486204,
+        -0.8764727516971973,
+        4.705041278488042,
+        1.5238002149668823,
+        -0.14876863060452575
+      ],
+      "timestamp": "2025-04-14T15:55:07.977243"
+    },
+    "confident": {
+      "source_image": "characters\\daniel\\source\\images\\confident.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\confident.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\confident.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\confident_normal.png",
+      "lighting_coefficients": [
+        -6.045263132266164e-16,
+        5.7687653537357715,
+        4.297655659602005,
+        -5.768765353735573,
+        -0.8223214169458005,
+        -4.017076779260001,
+        2.9272070600357565,
+        4.017076779259584,
+        -0.8223214169458156,
+        0.08818381476555388,
+        0.31401642759205023,
+        0.8037157267819726,
+        -2.771758051376031,
+        -0.803715726781892,
+        0.3140164275921319,
+        -0.08818381476562287
+      ],
+      "timestamp": "2025-04-14T15:55:09.342231"
+    },
+    "crying": {
+      "source_image": "characters\\daniel\\source\\images\\crying.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\crying.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\crying.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\crying_normal.png",
+      "lighting_coefficients": [
+        1.0138316534042248e-15,
+        -5.647507600927195,
+        3.945804878109961,
+        5.647507600926943,
+        -4.052755718042879,
+        5.98461226927165,
+        2.525819813720399,
+        -5.984612269271502,
+        -4.052755718042878,
+        -0.038232285632085874,
+        1.7652450229416885,
+        -2.3496731599523293,
+        -2.6099518273498106,
+        2.349673159953057,
+        1.765245022941555,
+        0.038232285633237814
+      ],
+      "timestamp": "2025-04-14T15:55:10.588346"
+    },
+    "crying2": {
+      "source_image": "characters\\daniel\\source\\images\\crying2.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\crying2.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\crying2.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\crying2_normal.png",
+      "lighting_coefficients": [
+        8.062903180153304e-16,
+        -6.825906315451581,
+        4.2890037367656495,
+        6.825906315451514,
+        -2.9825608207048,
+        6.784088228413949,
+        2.846310153158278,
+        -6.784088228413818,
+        -2.9825608207048537,
+        0.01742355027252126,
+        1.283247734557418,
+        -2.4770205365975095,
+        -2.8278348217868765,
+        2.4770205365979754,
+        1.2832477345575688,
+        -0.017423550273058287
+      ],
+      "timestamp": "2025-04-14T15:55:11.790517"
+    },
+    "depressed": {
+      "source_image": "characters\\daniel\\source\\images\\depressed.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\depressed.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\depressed.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\depressed_normal.png",
+      "lighting_coefficients": [
+        -2.1380456619110563e-15,
+        -29.99872023115567,
+        0.8319860465518892,
+        29.998720231152024,
+        -4.995440211561301,
+        26.12481555677855,
+        -0.5413069830017682,
+        -26.124815556776927,
+        -4.995440211561346,
+        0.2994765465975252,
+        2.1754765631441937,
+        -8.042005888904507,
+        -0.5107588702751623,
+        8.042005888904812,
+        2.1754765631440782,
+        -0.2994765465977907
+      ],
+      "timestamp": "2025-04-14T15:55:13.071532"
+    },
+    "injured": {
+      "source_image": "characters\\daniel\\source\\images\\injured.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\injured.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\injured.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\injured_normal.png",
+      "lighting_coefficients": [
+        -5.957340126470566e-16,
+        3.7952780294388417,
+        4.309168243708924,
+        -3.7952780294388666,
+        -2.2419400793459436,
+        -2.4064482496795274,
+        2.983673111224563,
+        2.406448249679629,
+        -2.2419400793459077,
+        0.21047455125415515,
+        0.9243877152405646,
+        0.3584877306138455,
+        -2.779158278665474,
+        -0.35848773061379147,
+        0.92438771524048,
+        -0.21047455125407294
+      ],
+      "timestamp": "2025-04-14T15:55:14.383153"
+    },
+    "nervous": {
+      "source_image": "characters\\daniel\\source\\images\\nervous.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\nervous.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\nervous.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\nervous_normal.png",
+      "lighting_coefficients": [
+        6.920323005572285e-16,
+        -9.40627839545126,
+        4.486170317473533,
+        9.406278395450542,
+        -2.0291793208562545,
+        8.99440037466234,
+        2.9562715988383053,
+        -8.994400374662403,
+        -2.0291793208563793,
+        -0.026566302931269787,
+        0.8226335473965115,
+        -3.150444493632751,
+        -2.9863070588171423,
+        3.150444493631735,
+        0.8226335473964126,
+        0.02656630293138905
+      ],
+      "timestamp": "2025-04-14T15:55:15.672060"
+    },
+    "sad": {
+      "source_image": "characters\\daniel\\source\\images\\sad.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\sad.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\sad.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\sad_normal.png",
+      "lighting_coefficients": [
+        -2.086486602501368e-15,
+        -15.902753398484762,
+        2.3365115375253103,
+        15.90275339848446,
+        -2.2690666040922767,
+        14.277763365841473,
+        0.9779847745909414,
+        -14.277763365840844,
+        -2.2690666040922474,
+        0.00704023247412114,
+        0.9655668281349485,
+        -4.636767024437613,
+        -1.4801082459642099,
+        4.636767024438514,
+        0.9655668281347934,
+        -0.0070402324739446895
+      ],
+      "timestamp": "2025-04-14T15:55:16.888033"
+    },
+    "sympathetic": {
+      "source_image": "characters\\daniel\\source\\images\\sympathetic.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\sympathetic.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\sympathetic.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\sympathetic_normal.png",
+      "lighting_coefficients": [
+        -2.038176870855396e-15,
+        -8.514387710514253,
+        6.597864056227973,
+        8.514387710514194,
+        -3.040256794102748,
+        8.477252543962042,
+        4.9921917718032445,
+        -8.477252543961692,
+        -3.040256794102592,
+        0.16662371758074102,
+        1.2607337432468377,
+        -3.1153189618361536,
+        -4.439902350321986,
+        3.1153189618361536,
+        1.2607337432468066,
+        -0.1666237175808385
+      ],
+      "timestamp": "2025-04-14T15:55:18.150724"
+    },
+    "tearsofjoy2": {
+      "source_image": "characters\\daniel\\source\\images\\tearsofjoy2.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\tearsofjoy2.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\tearsofjoy2.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\tearsofjoy2_normal.png",
+      "lighting_coefficients": [
+        -1.1273361695080155e-15,
+        -5.3976067443984626,
+        3.365122059880136,
+        5.397606744398557,
+        -2.6623722596604935,
+        5.443032244298916,
+        2.0251516380887438,
+        -5.443032244299238,
+        -2.662372259660424,
+        -0.059435453692444906,
+        1.1731820901969527,
+        -2.003111858834866,
+        -2.170035780805033,
+        2.003111858834139,
+        1.1731820901968084,
+        0.059435453692456904
+      ],
+      "timestamp": "2025-04-14T15:55:19.420816"
+    },
+    "tearsofjoy3": {
+      "source_image": "characters\\daniel\\source\\images\\tearsofjoy3.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\tearsofjoy3.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\tearsofjoy3.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\tearsofjoy3_normal.png",
+      "lighting_coefficients": [
+        1.2981064448495965e-15,
+        -8.127325103755373,
+        5.218788249962838,
+        8.127325103755172,
+        -1.6540007143713156,
+        7.8319173657115755,
+        3.723069760522426,
+        -7.831917365711123,
+        -1.6540007143711435,
+        -0.10623544915644037,
+        0.6649723220340624,
+        -2.7596838388558695,
+        -3.4635617043921476,
+        2.759683838856766,
+        0.6649723220339959,
+        0.1062354491563515
+      ],
+      "timestamp": "2025-04-14T15:55:20.621201"
+    },
+    "worried": {
+      "source_image": "characters\\daniel\\source\\images\\worried.png",
+      "mesh": "characters\\daniel\\processed\\meshes\\worried.obj",
+      "face_map": "characters\\daniel\\processed\\maps\\worried.png",
+      "normal_map": "characters\\daniel\\processed\\maps\\worried_normal.png",
+      "lighting_coefficients": [
+        -3.6649551089414377e-16,
+        -27.40115831011417,
+        2.5810213061393297,
+        27.4011583101146,
+        -3.26930000465682,
+        24.249525060676856,
+        1.0354866628486672,
+        -24.249525060677275,
+        -3.2693000046580085,
+        0.08167950697323015,
+        1.3253079588106094,
+        -7.701278607705403,
+        -1.738009850776171,
+        7.701278607706125,
+        1.3253079588105379,
+        -0.08167950697383648
+      ],
+      "timestamp": "2025-04-14T15:55:21.883977"
+    }
+  },
+  "processing_history": [
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "anger",
+      "timestamp": "2025-04-14T15:55:02.712603"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "annoyed",
+      "timestamp": "2025-04-14T15:55:03.986493"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "annoyed2",
+      "timestamp": "2025-04-14T15:55:05.272611"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "anxious",
+      "timestamp": "2025-04-14T15:55:06.586499"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "childanger2",
+      "timestamp": "2025-04-14T15:55:07.977243"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "confident",
+      "timestamp": "2025-04-14T15:55:09.342231"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "crying",
+      "timestamp": "2025-04-14T15:55:10.588346"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "crying2",
+      "timestamp": "2025-04-14T15:55:11.790517"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "depressed",
+      "timestamp": "2025-04-14T15:55:13.071532"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "injured",
+      "timestamp": "2025-04-14T15:55:14.383153"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "nervous",
+      "timestamp": "2025-04-14T15:55:15.672060"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "sad",
+      "timestamp": "2025-04-14T15:55:16.888033"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "sympathetic",
+      "timestamp": "2025-04-14T15:55:18.150724"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "tearsofjoy2",
+      "timestamp": "2025-04-14T15:55:19.420816"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "tearsofjoy3",
+      "timestamp": "2025-04-14T15:55:20.621201"
+    },
+    {
+      "type": "map_and_lighting_generation",
+      "frame": "worried",
+      "timestamp": "2025-04-14T15:55:21.883977"
+    }
+  ],
+  "mesh_parameters": {
+    "anger": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\anger.obj",
+      "source_image": "anger.png"
+    },
+    "annoyed": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\annoyed.obj",
+      "source_image": "annoyed.png"
+    },
+    "annoyed2": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\annoyed2.obj",
+      "source_image": "annoyed2.png"
+    },
+    "anxious": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\anxious.obj",
+      "source_image": "anxious.png"
+    },
+    "childanger2": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\childanger2.obj",
+      "source_image": "childanger2.png"
+    },
+    "confident": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\confident.obj",
+      "source_image": "confident.png"
+    },
+    "crying": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\crying.obj",
+      "source_image": "crying.png"
+    },
+    "crying2": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\crying2.obj",
+      "source_image": "crying2.png"
+    },
+    "depressed": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\depressed.obj",
+      "source_image": "depressed.png"
+    },
+    "injured": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\injured.obj",
+      "source_image": "injured.png"
+    },
+    "nervous": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\nervous.obj",
+      "source_image": "nervous.png"
+    },
+    "sad": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\sad.obj",
+      "source_image": "sad.png"
+    },
+    "sympathetic": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\sympathetic.obj",
+      "source_image": "sympathetic.png"
+    },
+    "tearsofjoy2": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\tearsofjoy2.obj",
+      "source_image": "tearsofjoy2.png"
+    },
+    "tearsofjoy3": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\tearsofjoy3.obj",
+      "source_image": "tearsofjoy3.png"
+    },
+    "worried": {
+      "obj_path": "characters\\daniel\\processed\\meshes\\worried.obj",
+      "source_image": "worried.png"
+    }
+  }
+}

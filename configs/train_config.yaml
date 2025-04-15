@@ -1,0 +1,23 @@
+# Training settings
+train_images: data/images
+embedding_dir: embeddings/faces
+normal_map_dir: data/normal_maps
+lighting_coeff_dir: data/lighting_coeffs
+
+# Output
+output_dir: models/lora_weights
+
+# Model settings
+sdxl_model_path: checkpoints/sdxl_base
+controlnet_model_path: checkpoints/controlnet_pretrained
+
+# LoRA config
+lora_rank: 8
+
+# Training hyperparams
+resolution: 1024
+batch_size: 4
+gradient_accumulation_steps: 2
+mixed_precision: bf16
+learning_rate: 1e-4
+max_train_steps: 5000
