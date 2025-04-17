@@ -1,0 +1,1035 @@
+{
+  "character_name": "daniel",
+  "source_info": {
+    "videos": [],
+    "images": []
+  },
+  "frames": {
+    "anger": {
+      "source_image": "characters\\daniel\\source\\images\\anger.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.016238"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.664428"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T22:56:30.199498"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:31.382780"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:30:59.664956"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:58:48.355586"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.016174"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\anger.obj",
+        "generated_at": "2025-04-17T13:59:54.016174"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\anger.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\anger.png",
+        "generated_at": "2025-04-17T13:58:48.355586"
+      },
+      "lighting": {
+        "coefficients": [
+          -412946578.74944377,
+          263325010800.3169,
+          5.304421287756626,
+          263325010802.2704,
+          425945783880.3501,
+          21100396166.752968,
+          3.8355438044348746,
+          21100396162.55429,
+          -425945783888.5014,
+          -4016468504684.6255,
+          830501077981.5981,
+          -62019138758.27294,
+          -3.5311175136588684,
+          -62019138755.770584,
+          -830501077978.1902,
+          -4016468504684.795
+        ],
+        "generated_at": "2025-04-17T13:58:48.355586"
+      }
+    },
+    "annoyed": {
+      "source_image": "characters\\daniel\\source\\images\\annoyed.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.054334"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.697480"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T22:56:31.599009"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:32.726564"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:02.234759"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:58:49.702411"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.055553"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\annoyed.obj",
+        "generated_at": "2025-04-17T13:59:54.055553"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\annoyed.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\annoyed.png",
+        "generated_at": "2025-04-17T13:58:49.702411"
+      },
+      "lighting": {
+        "coefficients": [
+          278155041.6693053,
+          280305918909.8311,
+          8.079855897825391,
+          280305918883.7482,
+          228184271156.4614,
+          51915910312.92385,
+          6.42317123261162,
+          51915910333.12266,
+          -228184271153.35925,
+          8104593895.773052,
+          -705145676417.8557,
+          -14310620898.312975,
+          -5.5001408955980065,
+          -14310620903.557808,
+          705145676416.2042,
+          8104593895.965811
+        ],
+        "generated_at": "2025-04-17T13:58:49.702411"
+      }
+    },
+    "annoyed2": {
+      "source_image": "characters\\daniel\\source\\images\\annoyed2.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.087743"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.729120"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T22:56:32.889243"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:33.998164"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:04.693705"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:58:50.998165"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.088614"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\annoyed2.obj",
+        "generated_at": "2025-04-17T13:59:54.088614"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\annoyed2.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\annoyed2.png",
+        "generated_at": "2025-04-17T13:58:50.998165"
+      },
+      "lighting": {
+        "coefficients": [
+          -94515348.6322272,
+          -8396356487.774747,
+          8.406078426834705,
+          -8396356477.541627,
+          -131632673315.4654,
+          42288725778.16803,
+          6.818017918540039,
+          42288725766.76244,
+          131632673314.90977,
+          3741496663856.8667,
+          236836314120.32968,
+          -6750411597.383161,
+          -5.662807646826067,
+          -6750411592.680993,
+          -236836314120.19193,
+          3741496663856.953
+        ],
+        "generated_at": "2025-04-17T13:58:50.998165"
+      }
+    },
+    "anxious": {
+      "source_image": "characters\\daniel\\source\\images\\anxious.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.119819"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.761645"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T22:56:34.230173"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:35.306086"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:07.209114"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:58:52.356230"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.122553"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\anxious.obj",
+        "generated_at": "2025-04-17T13:59:54.122553"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\anxious.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\anxious.png",
+        "generated_at": "2025-04-17T13:58:52.356230"
+      },
+      "lighting": {
+        "coefficients": [
+          32570230.25917718,
+          924556415582.3062,
+          2.678104031635363,
+          924556415619.2583,
+          59013096810.099754,
+          12470431373.13418,
+          1.1553760242132691,
+          12470431340.054981,
+          -59013096815.13898,
+          -44061682260.06552,
+          246898967291.69193,
+          -10779642687.828453,
+          -1.7613742142186708,
+          -10779642677.168728,
+          -246898967289.60907,
+          -44061682260.192795
+        ],
+        "generated_at": "2025-04-17T13:58:52.356230"
+      }
+    },
+    "childanger2": {
+      "source_image": "characters\\daniel\\source\\images\\childanger2.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.150219"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.799170"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:36.581130"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:09.806557"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:58:53.625247"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.155466"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\childanger2.obj",
+        "generated_at": "2025-04-17T13:59:54.155466"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\childanger2.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\childanger2.png",
+        "generated_at": "2025-04-17T13:58:53.625247"
+      },
+      "lighting": {
+        "coefficients": [
+          -6502742.599443829,
+          -12538184740.065594,
+          1.1393607703067083,
+          -12538184712.94172,
+          1225215676956.2207,
+          823629830.2791804,
+          -0.26308982599648734,
+          823629805.6524203,
+          -1225215676963.4133,
+          -659449504071.1849,
+          -32551935119.956417,
+          -109921824956.48952,
+          -0.7163393783916456,
+          -109921824948.33453,
+          32551935122.802494,
+          -659449504071.2599
+        ],
+        "generated_at": "2025-04-17T13:58:53.625247"
+      }
+    },
+    "confident": {
+      "source_image": "characters\\daniel\\source\\images\\confident.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.179007"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.831659"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:37.970885"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:12.834483"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:58:54.962646"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.185214"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\confident.obj",
+        "generated_at": "2025-04-17T13:59:54.185214"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\confident.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\confident.png",
+        "generated_at": "2025-04-17T13:58:54.962646"
+      },
+      "lighting": {
+        "coefficients": [
+          4651355.543927909,
+          -29264776730.525578,
+          4.136911612991572,
+          -29264776736.147324,
+          -6510560557.598289,
+          234306298.02952367,
+          2.7422301737406785,
+          234306301.11588165,
+          6510560557.052312,
+          90325456981.28471,
+          17903162362.279377,
+          -1068343274.8784509,
+          -2.6779205274607887,
+          -1068343275.038137,
+          -17903162362.182003,
+          90325456981.23175
+        ],
+        "generated_at": "2025-04-17T13:58:54.962646"
+      }
+    },
+    "crying": {
+      "source_image": "characters\\daniel\\source\\images\\crying.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.209120"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.863485"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:39.379827"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:15.888767"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:58:56.297614"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.215456"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\crying.obj",
+        "generated_at": "2025-04-17T13:59:54.215456"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\crying.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\crying.png",
+        "generated_at": "2025-04-17T13:58:56.297614"
+      },
+      "lighting": {
+        "coefficients": [
+          -247992773.23159438,
+          -537294482693.39526,
+          3.4526045965809335,
+          -537294482681.2492,
+          -568666527685.8024,
+          -43452500144.21342,
+          2.0685019280855075,
+          -43452500156.80532,
+          568666527677.5865,
+          -4177228054705.404,
+          -974866063105.724,
+          138600363482.72458,
+          -2.2687521369248382,
+          138600363487.54587,
+          974866063109.3035,
+          -4177228054705.1787
+        ],
+        "generated_at": "2025-04-17T13:58:56.297614"
+      }
+    },
+    "crying2": {
+      "source_image": "characters\\daniel\\source\\images\\crying2.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.239299"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.889265"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:40.815087"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:18.716036"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:58:57.581483"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.246875"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\crying2.obj",
+        "generated_at": "2025-04-17T13:59:54.246875"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\crying2.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\crying2.png",
+        "generated_at": "2025-04-17T13:58:57.581483"
+      },
+      "lighting": {
+        "coefficients": [
+          -771167.2138017613,
+          -54275210.742793165,
+          4.670836147449375,
+          -54275203.591488004,
+          1032910623.8457601,
+          17146952.77708225,
+          3.244858467478789,
+          17146944.461459823,
+          -1032910629.2499734,
+          -4021946.6721685356,
+          1773715495.158864,
+          125346051.46534151,
+          -3.0848775370284147,
+          125346055.02399826,
+          -1773715492.8948398,
+          -4021946.602560807
+        ],
+        "generated_at": "2025-04-17T13:58:57.581483"
+      }
+    },
+    "depressed": {
+      "source_image": "characters\\daniel\\source\\images\\depressed.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.269213"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.924345"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:42.023084"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:21.471687"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:58:58.815749"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.281125"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\depressed.obj",
+        "generated_at": "2025-04-17T13:59:54.281125"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\depressed.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\depressed.png",
+        "generated_at": "2025-04-17T13:58:58.815749"
+      },
+      "lighting": {
+        "coefficients": [
+          289420237.0520425,
+          180370405830.3338,
+          1.655312156209645,
+          180370405886.79257,
+          -374604090087.108,
+          68381772830.68192,
+          0.28129458556859593,
+          68381772780.978424,
+          374604090078.40295,
+          -5864859656655.596,
+          -947188606938.4141,
+          -74493713767.8962,
+          -1.0877457582954924,
+          -74493713752.30045,
+          947188606942.1357,
+          -5864859656656.08
+        ],
+        "generated_at": "2025-04-17T13:58:58.815749"
+      }
+    },
+    "injured": {
+      "source_image": "characters\\daniel\\source\\images\\injured.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.304711"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.953844"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:43.311101"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:24.395103"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:59:00.111948"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.313823"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\injured.obj",
+        "generated_at": "2025-04-17T13:59:54.313823"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\injured.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\injured.png",
+        "generated_at": "2025-04-17T13:59:00.111948"
+      },
+      "lighting": {
+        "coefficients": [
+          -8648581.709199235,
+          16783070985.333624,
+          4.225837676025717,
+          16783070982.13823,
+          7972878715.201002,
+          -376583537.93299645,
+          2.882039768562445,
+          -376583536.7851667,
+          -7972878719.423729,
+          20384300172.067738,
+          26597324683.359818,
+          -1232465153.2071733,
+          -2.7366699881832246,
+          -1232465152.8618355,
+          -26597324681.622128,
+          20384300171.742622
+        ],
+        "generated_at": "2025-04-17T13:59:00.111948"
+      }
+    },
+    "nervous": {
+      "source_image": "characters\\daniel\\source\\images\\nervous.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.339275"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:24.989159"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:44.789861"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:27.396751"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:59:01.431637"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.339072"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\nervous.obj",
+        "generated_at": "2025-04-17T13:59:54.339072"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\nervous.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\nervous.png",
+        "generated_at": "2025-04-17T13:59:01.431637"
+      },
+      "lighting": {
+        "coefficients": [
+          1965885066.5416763,
+          130611102338.54709,
+          4.205850162899966,
+          130611102356.952,
+          -1392130997698.0947,
+          1823759748.322342,
+          2.6418335559309267,
+          1823759730.6100097,
+          1392130997694.322,
+          266480225479.46985,
+          3596641792195.136,
+          -281618088215.803,
+          -2.817012146254558,
+          -281618088209.51196,
+          -3596641792193.641,
+          266480225479.55063
+        ],
+        "generated_at": "2025-04-17T13:59:01.431637"
+      }
+    },
+    "sad": {
+      "source_image": "characters\\daniel\\source\\images\\sad.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.365570"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:25.015806"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:46.110683"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:30.314159"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:59:02.645297"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.367654"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\sad.obj",
+        "generated_at": "2025-04-17T13:59:54.367654"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\sad.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\sad.png",
+        "generated_at": "2025-04-17T13:59:02.645297"
+      },
+      "lighting": {
+        "coefficients": [
+          2713722048.688269,
+          -247499696426.62088,
+          2.2726633656163444,
+          -247499696399.1865,
+          -2502122730367.7197,
+          63860894562.0927,
+          0.9602863958956473,
+          63860894537.285194,
+          2502122730363.217,
+          -344837270607.2777,
+          3748068871355.9424,
+          2159578881521.9343,
+          -1.4220337330653554,
+          2159578881530.0828,
+          -3748068871354.017,
+          -344837270607.30023
+        ],
+        "generated_at": "2025-04-17T13:59:02.645297"
+      }
+    },
+    "sympathetic": {
+      "source_image": "characters\\daniel\\source\\images\\sympathetic.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.400160"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:25.049307"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:47.344754"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:32.986395"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:59:03.846279"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.397482"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\sympathetic.obj",
+        "generated_at": "2025-04-17T13:59:54.397482"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\sympathetic.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\sympathetic.png",
+        "generated_at": "2025-04-17T13:59:03.846279"
+      },
+      "lighting": {
+        "coefficients": [
+          91333657.06257056,
+          606790535703.9266,
+          6.848852201656356,
+          606790535726.5247,
+          -402904370914.1574,
+          -2397290023.0580287,
+          5.223219976821222,
+          -2397290044.6897674,
+          402904370908.0736,
+          -76479476444.66342,
+          114976157693.18063,
+          56326610867.28731,
+          -4.612214466917495,
+          56326610874.843544,
+          -114976157690.63287,
+          -76479476445.05243
+        ],
+        "generated_at": "2025-04-17T13:59:03.846279"
+      }
+    },
+    "tearsofjoy2": {
+      "source_image": "characters\\daniel\\source\\images\\tearsofjoy2.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.431662"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:25.079457"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:48.658851"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:36.004825"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:59:05.167438"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.425662"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\tearsofjoy2.obj",
+        "generated_at": "2025-04-17T13:59:54.425662"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\tearsofjoy2.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\tearsofjoy2.png",
+        "generated_at": "2025-04-17T13:59:05.167438"
+      },
+      "lighting": {
+        "coefficients": [
+          -457353038.7243285,
+          709279977979.7153,
+          3.246152299466598,
+          709279977991.7158,
+          -270759333215.14737,
+          3739256627399.564,
+          1.913951252692471,
+          3739256627387.5293,
+          270759333210.87943,
+          1510463941532.4873,
+          41985776837.670845,
+          2151887051.887538,
+          -2.098794743150059,
+          2151887056.326969,
+          -41985776835.83744,
+          1510463941532.5813
+        ],
+        "generated_at": "2025-04-17T13:59:05.167438"
+      }
+    },
+    "tearsofjoy3": {
+      "source_image": "characters\\daniel\\source\\images\\tearsofjoy3.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.454591"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:25.103149"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:49.955005"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:38.994685"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:59:06.436788"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.455208"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\tearsofjoy3.obj",
+        "generated_at": "2025-04-17T13:59:54.455208"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\tearsofjoy3.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\tearsofjoy3.png",
+        "generated_at": "2025-04-17T13:59:06.436788"
+      },
+      "lighting": {
+        "coefficients": [
+          377592794.517659,
+          2267712066589.1636,
+          4.607633292216764,
+          2267712066611.0645,
+          452042028050.74713,
+          203516284730.02744,
+          3.125496248656358,
+          203516284709.68448,
+          -452042028053.1875,
+          -91958467094.37535,
+          -892260627858.0886,
+          9944990230.058727,
+          -3.0481857709287237,
+          9944990236.923439,
+          892260627858.9972,
+          -91958467094.07628
+        ],
+        "generated_at": "2025-04-17T13:59:06.436788"
+      }
+    },
+    "worried": {
+      "source_image": "characters\\daniel\\source\\images\\worried.png",
+      "processing_steps": [
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:19.482929"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-14T22:56:25.130642"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-14T23:08:51.162481"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-15T14:31:41.920467"
+        },
+        {
+          "type": "map_and_lighting_generation",
+          "timestamp": "2025-04-17T13:59:07.615363"
+        },
+        {
+          "type": "mesh_generation",
+          "timestamp": "2025-04-17T13:59:54.485370"
+        }
+      ],
+      "mesh": {
+        "path": "characters\\daniel\\processed\\meshes\\worried.obj",
+        "generated_at": "2025-04-17T13:59:54.485370"
+      },
+      "maps": {
+        "face": "characters\\daniel\\processed\\maps\\faces\\worried.png",
+        "normal": "characters\\daniel\\processed\\maps\\normals\\worried.png",
+        "generated_at": "2025-04-17T13:59:07.615363"
+      },
+      "lighting": {
+        "coefficients": [
+          -21361992.08505166,
+          -33005676582.2428,
+          2.713123481487217,
+          -33005676518.704956,
+          120767106769.43655,
+          -1302485715.2538412,
+          1.1221147676301633,
+          -1302485771.0562384,
+          -120767106774.09889,
+          -924161572.0325125,
+          138205369300.8589,
+          -10738489364.39438,
+          -1.8479525605036062,
+          -10738489346.878677,
+          -138205369299.05057,
+          -924161572.0796682
+        ],
+        "generated_at": "2025-04-17T13:59:07.615363"
+      }
+    },
+    "": {
+      "anger": {
+        "source_image": "characters\\daniel\\source\\images\\anger.png",
+        "processing_steps": []
+      },
+      "annoyed": {
+        "source_image": "characters\\daniel\\source\\images\\annoyed.png",
+        "processing_steps": []
+      },
+      "annoyed2": {
+        "source_image": "characters\\daniel\\source\\images\\annoyed2.png",
+        "processing_steps": []
+      },
+      "anxious": {
+        "source_image": "characters\\daniel\\source\\images\\anxious.png",
+        "processing_steps": []
+      },
+      "childanger2": {
+        "source_image": "characters\\daniel\\source\\images\\childanger2.png",
+        "processing_steps": []
+      },
+      "confident": {
+        "source_image": "characters\\daniel\\source\\images\\confident.png",
+        "processing_steps": []
+      },
+      "crying": {
+        "source_image": "characters\\daniel\\source\\images\\crying.png",
+        "processing_steps": []
+      },
+      "crying2": {
+        "source_image": "characters\\daniel\\source\\images\\crying2.png",
+        "processing_steps": []
+      },
+      "depressed": {
+        "source_image": "characters\\daniel\\source\\images\\depressed.png",
+        "processing_steps": []
+      },
+      "injured": {
+        "source_image": "characters\\daniel\\source\\images\\injured.png",
+        "processing_steps": []
+      },
+      "nervous": {
+        "source_image": "characters\\daniel\\source\\images\\nervous.png",
+        "processing_steps": []
+      },
+      "sad": {
+        "source_image": "characters\\daniel\\source\\images\\sad.png",
+        "processing_steps": []
+      },
+      "sympathetic": {
+        "source_image": "characters\\daniel\\source\\images\\sympathetic.png",
+        "processing_steps": []
+      },
+      "tearsofjoy2": {
+        "source_image": "characters\\daniel\\source\\images\\tearsofjoy2.png",
+        "processing_steps": []
+      },
+      "tearsofjoy3": {
+        "source_image": "characters\\daniel\\source\\images\\tearsofjoy3.png",
+        "processing_steps": []
+      },
+      "worried": {
+        "source_image": "characters\\daniel\\source\\images\\worried.png",
+        "processing_steps": []
+      }
+    }
+  }
+}

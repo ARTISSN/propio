@@ -1,0 +1,47 @@
+# Core ML/DL Framework Dependencies
+--extra-index-url https://download.pytorch.org/whl/cu118
+--find-links https://download.pytorch.org/whl/torch_stable.html
+torch>=2.1.1
+torchvision==0.16.1+cu118
+accelerate==0.27.0
+transformers>=4.36.0
+diffusers>=0.25.0
+peft>=0.8.0
+
+# Scientific Computing (pre-built wheels)
+numpy>=1.24.3
+scipy==1.11.4
+scikit-learn==1.3.0
+
+# Image Processing
+Pillow>=10.0.0
+opencv-python>=4.8.0
+scikit-image>=0.22.0
+
+# Face Processing & Computer Vision Core
+mediapipe==0.10.21
+dlib-bin>=19.24.6
+face-recognition-models==0.3.0
+face-recognition==1.3.0
+
+# 3D Processing & Visualization
+open3d==0.19.0
+trimesh==4.0.5
+pyvista==0.44.1
+
+# Utilities and Progress Tracking
+tqdm>=4.66.0
+PyYAML>=6.0.1
+matplotlib==3.7.0
+
+# Optional but Recommended
+safetensors>=0.4.0
+xformers==0.0.23
+
+# Development Tools
+pytest==7.4.0
+black==23.9.1
+isort==5.12.0
+
+# Utility Libraries
+modal==0.74.4

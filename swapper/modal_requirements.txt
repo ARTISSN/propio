@@ -1,0 +1,26 @@
+# Core ML/DL Dependencies
+torch==2.1.1+cu118
+torchvision==0.16.1+cu118
+accelerate==0.27.0
+transformers==4.36.0
+diffusers==0.25.0
+peft==0.8.0
+safetensors==0.4.0
+xformers==0.0.23
+huggingface-hub==0.19.4
+
+# Computer Vision
+opencv-python==4.8.0.74
+scikit-image==0.22.0
+scikit-learn>=1.0.0
+scipy>=1.8.0
+numpy>=1.24.3,<2.0.0
+Pillow==10.0.0
+
+# Face Processing
+dlib-bin==19.24.6
+
+# Required Utils
+PyYAML==6.0.1
+tqdm==4.66.0
+wandb==0.16.3
