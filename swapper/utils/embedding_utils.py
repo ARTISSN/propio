@@ -5,10 +5,11 @@ import cv2
 import numpy as np
 import os
 import json
+from pathlib import Path
 
-# Paths to Dlib models
-SHAPE_PREDICTOR_PATH = os.getenv("DLIB_SHAPE_PREDICTOR", "models/shape_predictor_68_face_landmarks.dat")
-FACE_REC_MODEL_PATH = os.getenv("DLIB_FACE_REC_MODEL", "models/dlib_face_recognition_resnet_model_v1.dat")
+# Default paths for local execution
+DEFAULT_SHAPE_PREDICTOR = "models/shape_predictor_68_face_landmarks.dat"
+DEFAULT_FACE_REC_MODEL = "models/dlib_face_recognition_resnet_model_v1.dat"
 
 # Initialize model holders
 face_detector = None
@@ -21,20 +22,88 @@ def initialize_models():
     
     if face_detector is None:
         print("\nInitializing face detection models...")
-        print(f"Looking for shape predictor at: {SHAPE_PREDICTOR_PATH}")
-        print(f"Path exists: {os.path.exists(SHAPE_PREDICTOR_PATH)}")
         
-        if not os.path.exists(SHAPE_PREDICTOR_PATH):
-            raise RuntimeError(f"Shape predictor model not found at {SHAPE_PREDICTOR_PATH}")
+        # First try environment variables
+        shape_predictor_path = os.getenv("DLIB_SHAPE_PREDICTOR")
+        face_rec_path = os.getenv("DLIB_FACE_REC_MODEL")
+        
+        # If not in env vars, check local models directory
+        if not shape_predictor_path or not os.path.exists(shape_predictor_path):
+            # Try relative to script location
+            script_dir = Path(__file__).parent.parent
+            shape_predictor_path = str(script_dir / DEFAULT_SHAPE_PREDICTOR)
+            face_rec_path = str(script_dir / DEFAULT_FACE_REC_MODEL)
             
-        face_detector = dlib.get_frontal_face_detector()
-        shape_predictor = dlib.shape_predictor(SHAPE_PREDICTOR_PATH)
-        face_rec_model = dlib.face_recognition_model_v1(FACE_REC_MODEL_PATH)
-        print("Models initialized successfully")
+            # If not there, try relative to current working directory
+            if not os.path.exists(shape_predictor_path):
+                shape_predictor_path = DEFAULT_SHAPE_PREDICTOR
+                face_rec_path = DEFAULT_FACE_REC_MODEL
+        
+        # Verify models exist
+        if not os.path.exists(shape_predictor_path):
+            raise RuntimeError(
+                f"Shape predictor model not found at {shape_predictor_path}. "
+                "Please download it from http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
+            )
+        
+        if not os.path.exists(face_rec_path):
+            raise RuntimeError(
+                f"Face recognition model not found at {face_rec_path}. "
+                "Please download it from http://dlib.net/files/dlib_face_recognition_resnet_model_v1.dat.bz2"
+            )
+            
+        print(f"Using shape predictor from: {shape_predictor_path}")
+        print(f"Using face recognition model from: {face_rec_path}")
+        
+        # Initialize models
+        try:
+            face_detector = dlib.get_frontal_face_detector()
+            shape_predictor = dlib.shape_predictor(shape_predictor_path)
+            face_rec_model = dlib.face_recognition_model_v1(face_rec_path)
+            print("Models initialized successfully")
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize models: {str(e)}")
+
+def download_models(models_dir: str = "models"):
+    """Download dlib models if they don't exist."""
+    import urllib.request
+    import bz2
+    
+    os.makedirs(models_dir, exist_ok=True)
+    
+    models = {
+        "shape_predictor_68_face_landmarks.dat": 
+            "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2",
+        "dlib_face_recognition_resnet_model_v1.dat":
+            "http://dlib.net/files/dlib_face_recognition_resnet_model_v1.dat.bz2"
+    }
+    
+    for model_name, url in models.items():
+        model_path = os.path.join(models_dir, model_name)
+        if not os.path.exists(model_path):
+            print(f"Downloading {model_name}...")
+            compressed_path = model_path + ".bz2"
+            
+            # Download compressed file
+            urllib.request.urlretrieve(url, compressed_path)
+            
+            # Extract file
+            with bz2.open(compressed_path, 'rb') as source, open(model_path, 'wb') as dest:
+                dest.write(source.read())
+            
+            # Remove compressed file
+            os.remove(compressed_path)
+            print(f"Successfully downloaded and extracted {model_name}")
 
 def get_face_embedding(image_path: str, character_path: str = None) -> np.ndarray:
     """Extract 128D facial embedding from an image file path."""
-    initialize_models()  # Ensure models are loaded
+    try:
+        initialize_models()  # Ensure models are loaded
+    except RuntimeError as e:
+        # If models aren't found, try downloading them
+        print("Models not found, attempting to download...")
+        download_models()
+        initialize_models()
     
     print(f"\nProcessing image: {image_path}")
     print(f"Image exists: {os.path.exists(image_path)}")
@@ -75,6 +144,8 @@ def get_face_embedding(image_path: str, character_path: str = None) -> np.ndarra
 
 def get_face_embedding_from_array(image_array: np.ndarray) -> np.ndarray:
     """Extract 128D facial embedding from an image array (OpenCV RGB)."""
+    initialize_models()  # Ensure models are loaded
+    
     detections = face_detector(image_array, 1)
 
     if len(detections) == 0:

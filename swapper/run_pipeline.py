@@ -9,7 +9,10 @@ import mediapipe as mp
 import datetime
 import utils.modal_utils as modal_utils
 from utils.mesh_utils import generate_face_mesh, generate_normal_maps
-from utils.lighting_utils import LightingProcessor, calculate_lighting_coefficients
+from utils.lighting_utils import LightingProcessor
+from utils.embedding_utils import get_face_embedding
+import numpy as np
+from utils.keep_alive import prevent_sleep, allow_sleep
 
 class CharacterPipeline:
     def __init__(self, character_name: str, base_path: str = "data"):
@@ -24,9 +27,6 @@ class CharacterPipeline:
         if self.metadata_path.exists():
             with open(self.metadata_path, 'r') as f:
                 self.metadata = json.load(f)
-                # Convert old format to new format if needed
-                if "mesh_parameters" in self.metadata or "processed_frames" in self.metadata:
-                    self._migrate_to_new_format()
         else:
             self.metadata = {
                 "character_name": self.character_name,
@@ -70,58 +70,6 @@ class CharacterPipeline:
         with open(self.metadata_path, 'w') as f:
             json.dump(self.metadata, f, indent=2)
 
-    def _migrate_to_new_format(self):
-        """Migrate old metadata format to new format."""
-        new_metadata = {
-            "character_name": self.metadata["character_name"],
-            "source_info": self.metadata["source_info"],
-            "frames": {}
-        }
-
-        # Merge existing data into new format
-        mesh_params = self.metadata.get("mesh_parameters", {})
-        processed = self.metadata.get("processed_frames", {})
-        history = self.metadata.get("processing_history", [])
-
-        # Create unified frame entries
-        for frame_id in set(list(mesh_params.keys()) + list(processed.keys())):
-            frame_data = {"processing_steps": []}
-            
-            # Add mesh data if exists
-            if frame_id in mesh_params:
-                mesh_info = mesh_params[frame_id]
-                frame_data["source_image"] = mesh_info["source_image"]
-                frame_data["mesh"] = {
-                    "path": mesh_info["obj_path"],
-                    "generated_at": None  # Will be updated from history
-                }
-
-            # Add processed data if exists
-            if frame_id in processed:
-                proc_info = processed[frame_id]
-                frame_data["maps"] = {
-                    "face": proc_info.get("face_map"),
-                    "normal": proc_info.get("normal_map"),
-                    "generated_at": proc_info.get("timestamp")
-                }
-                if "lighting_coefficients" in proc_info:
-                    frame_data["lighting"] = {
-                        "coefficients": proc_info["lighting_coefficients"],
-                        "generated_at": proc_info.get("timestamp")
-                    }
-
-            # Add relevant history entries
-            for entry in history:
-                if entry.get("frame") == frame_id:
-                    frame_data["processing_steps"].append({
-                        "type": entry["type"],
-                        "timestamp": entry["timestamp"]
-                    })
-
-            new_metadata["frames"][frame_id] = frame_data
-
-        self.metadata = new_metadata
-
     def generate_mesh(self):
         """Generate 3D mesh and normal maps from processed images."""
         print(f"Generating mesh for {self.character_name}")
@@ -143,8 +91,10 @@ class CharacterPipeline:
             refine_landmarks=True,
             min_detection_confidence=0.5
         ) as face_mesh:
+            print(f"Processing images in: {source_image_dir}")
             # Process each image in the source directory
-            for img_path in source_image_dir.glob("*.[jp][pn][g]"):
+            for img_path in source_image_dir.glob("*.*"):
+                print(f"Processing image: {img_path}")
                 try:
                     mesh_data = generate_face_mesh(str(img_path), str(mesh_dir), face_mesh)
                     
@@ -178,8 +128,8 @@ class CharacterPipeline:
         print(f"Mesh generation completed for {self.character_name}")
 
     def generate_maps(self):
-        """Generate texture and normal maps, and calculate lighting coefficients."""
-        print(f"Generating maps and calculating lighting for {self.character_name}")
+        """Generate texture and normal maps, calculate lighting coefficients, and generate face embeddings."""
+        print(f"Generating maps, lighting, and embeddings for {self.character_name}")
         
         # Set up directories
         processed_dir = self.char_path / "processed"
@@ -201,60 +151,29 @@ class CharacterPipeline:
             print("No mesh files found to process")
             return
         
-        # Check which meshes need map generation by comparing with existing maps
-        frames_to_process = {}
+        # Process each frame
         for mesh_path in mesh_files:
             base_name = mesh_path.stem
-            face_map = faces_dir / f"{base_name}.png"
-            normal_map = normals_dir / f"{base_name}.png"
-            
-            # If either map is missing, we need to process this frame
-            if not face_map.exists() or not normal_map.exists():
-                # Find corresponding source image
-                expression = base_name.split('_')[0] if '_' in base_name else ''
-                source_image = None
-                
-                # Look for source image in metadata first
-                if (expression in self.metadata["frames"] and 
-                    base_name in self.metadata["frames"][expression] and 
-                    "source_image" in self.metadata["frames"][expression][base_name]):
-                    source_path = self.base_path / self.metadata["frames"][expression][base_name]["source_image"]
-                    if source_path.exists():
-                        source_image = source_path
-                
-                # If not found in metadata, look in source directory
-                if not source_image:
-                    source_dir = self.char_path / "source/images"
-                    if expression:
-                        source_dir = source_dir / expression
-                    
-                    # Look for matching source image with any supported extension
-                    for ext in ['.jpg', '.jpeg', '.png']:
-                        potential_source = source_dir / f"{base_name}{ext}"
-                        if potential_source.exists():
-                            source_image = potential_source
-                            break
-                
-                if source_image:
-                    frames_to_process[base_name] = {
-                        "mesh_path": mesh_path,
-                        "source_image": source_image
-                    }
-                else:
-                    print(f"Warning: Could not find source image for mesh {base_name}")
-        
-        if not frames_to_process:
-            print("No new frames to process for map generation")
-            return
-        
-        print(f"Processing maps for {len(frames_to_process)} frames...")
-        
-        # Process each frame
-        for frame_id, frame_data in frames_to_process.items():
             try:
-                # Get paths
-                obj_path = frame_data["mesh_path"]
-                source_image = frame_data["source_image"]
+                # Find source image
+                source_image = None
+                source_dir = self.char_path / "source/images"
+                for ext in ['.jpg', '.jpeg', '.png']:
+                    potential_source = source_dir / f"{base_name}{ext}"
+                    if potential_source.exists():
+                        source_image = potential_source
+                        break
+                
+                if not source_image:
+                    print(f"Warning: Could not find source image for mesh {base_name}")
+                    continue
+                
+                # Generate face embedding
+                print(f"Generating embedding for {source_image}")
+                embedding = get_face_embedding(str(source_image))
+                if embedding is None:
+                    print(f"Warning: Could not generate embedding for {source_image}")
+                    embedding = [0.0] * 128  # Default embedding dimension
                 
                 # Read the source image
                 image = cv2.imread(str(source_image))
@@ -269,7 +188,6 @@ class CharacterPipeline:
                     refine_landmarks=True,
                     min_detection_confidence=0.5
                 ) as face_mesh:
-                    # Get landmarks
                     results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
                     if not results.multi_face_landmarks:
                         print(f"No face detected in: {source_image}")
@@ -278,7 +196,7 @@ class CharacterPipeline:
                 
                 # Generate maps
                 mesh_data = {
-                    'obj_path': str(obj_path),
+                    'obj_path': str(mesh_path),
                     'image': image,
                     'landmarks': landmarks
                 }
@@ -288,33 +206,29 @@ class CharacterPipeline:
                 # Generate normal maps and face cutouts
                 map_data = generate_normal_maps(mesh_data, str(maps_dir))
                 if not map_data:
-                    print(f"Failed to generate maps for frame {frame_id}")
+                    print(f"Failed to generate maps for frame {base_name}")
                     continue
                 
                 # Process lighting coefficients
                 lighting_data = lighting_processor.process_frame(
-                    frame_id,
+                    base_name,
                     Path(map_data['face_path']),
                     Path(map_data['normal_path'])
                 )
                 
                 if not lighting_data:
-                    print(f"Failed to calculate lighting for frame {frame_id}")
+                    print(f"Failed to calculate lighting for frame {base_name}")
                     continue
-            
-                # Update metadata
-                expression = frame_id.split('_')[0] if '_' in frame_id else ''
-                if expression not in self.metadata["frames"]:
-                    self.metadata["frames"][expression] = {}
                 
-                if frame_id not in self.metadata["frames"][expression]:
-                    self.metadata["frames"][expression][frame_id] = {
+                # Update metadata
+                if base_name not in self.metadata["frames"]:
+                    self.metadata["frames"][base_name] = {
                         "source_image": str(source_image.relative_to(self.base_path)),
                         "processing_steps": []
                     }
                 
                 # Update metadata with new data
-                self.metadata["frames"][frame_id].update({
+                self.metadata["frames"][base_name].update({
                     "maps": {
                         "face": str(Path(map_data['face_path']).relative_to(self.base_path)),
                         "normal": str(Path(map_data['normal_path']).relative_to(self.base_path)),
@@ -323,11 +237,12 @@ class CharacterPipeline:
                     "lighting": {
                         "coefficients": lighting_data["lighting_coefficients"],
                         "generated_at": timestamp
-                    }
+                    },
+                    "embedding": embedding.tolist() if isinstance(embedding, np.ndarray) else embedding
                 })
                 
                 # Add processing step to history
-                self.metadata["frames"][frame_id]["processing_steps"].append({
+                self.metadata["frames"][base_name]["processing_steps"].append({
                     "type": "map_and_lighting_generation",
                     "timestamp": timestamp
                 })
@@ -335,15 +250,53 @@ class CharacterPipeline:
                 # Save metadata after each successful frame processing
                 self.save_metadata()
                 
-                print(f"Successfully processed maps and lighting for frame {frame_id}")
+                print(f"Successfully processed maps, lighting, and embedding for frame {base_name}")
                 
             except Exception as e:
-                print(f"Error processing frame {frame_id}: {str(e)}")
+                print(f"Error processing frame {base_name}: {str(e)}")
                 import traceback
                 traceback.print_exc()
                 continue
         
         print(f"Map and lighting generation completed for {self.character_name}")
+
+    def perform_face_swap(self, source_character: str):
+        """Generate face swaps using normal maps from source character."""
+        print(f"Performing face swap from {source_character} to {self.character_name}")
+        
+        # Set up paths
+        source_char_path = self.base_path / "characters" / source_character
+        source_maps_dir = source_char_path / "processed/maps"
+        source_metadata_path = source_char_path / "metadata.json"
+        
+        output_dir = self.char_path / "swapped"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Load source character metadata
+        if not source_metadata_path.exists():
+            raise ValueError(f"Source character {source_character} metadata not found")
+            
+        with open(source_metadata_path, 'r') as f:
+            source_metadata = json.load(f)
+        
+        # Load our LoRA model path
+        lora_path = self.char_path / "lora_output/best_model"
+        if not lora_path.exists():
+            raise ValueError(f"LoRA model not found for {self.character_name}")
+        
+        # Call Modal function to perform the swap
+        try:
+            result = modal_utils.run_modal_swap(
+                target_character=self.character_name,
+                source_character=source_character,
+                source_metadata=source_metadata
+            )
+            if isinstance(result, dict) and result.get("status") == "error":
+                print(f"Face swap failed: {result.get('message')}")
+            else:
+                print("Face swap completed successfully")
+        except Exception as e:
+            print(f"Error during face swap: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="Run character processing pipeline")
@@ -353,7 +306,14 @@ def main():
     # Pipeline-specific arguments
     parser.add_argument("--mesh", action="store_true", help="Generate 3D mesh")
     parser.add_argument("--maps", action="store_true", help="Generate texture and normal maps")
-    parser.add_argument("--train", action="store_true", help="Train LoRA off generated data")
+    
+    # Enhanced training arguments
+    training_group = parser.add_argument_group('training')
+    training_group.add_argument("--train", action="store_true", help="Train LoRA off generated data")
+    training_group.add_argument("--from-checkpoint", help="Resume training from a specific checkpoint directory (e.g., 'training_20240418_123456')")
+    training_group.add_argument("--training-name", help="Custom name for this training run (default: timestamp-based)")
+    
+    parser.add_argument("--swap", help="Perform face swap using normal maps from specified source character")
     parser.add_argument("--all", action="store_true", help="Run all pipeline steps")
     args = parser.parse_args()
 
@@ -369,13 +329,27 @@ def main():
     if args.train or run_all:
         try:
             print("Starting LoRA training on Modal...")
-            result = modal_utils.run_modal_train(args.character)
+            prevent_sleep()
+            
+            # Pass training configuration to Modal
+            training_config = {
+                "from_checkpoint": args.from_checkpoint,
+                "training_name": args.training_name
+            }
+            
+            result = modal_utils.run_modal_train(args.character, training_config)
             if isinstance(result, dict) and result.get("status") == "error":
                 print(f"Training failed: {result.get('message')}")
             else:
                 print("Training completed successfully")
         except Exception as e:
             print(f"Error during Modal training: {e}")
+        finally:
+            allow_sleep()
 
 if __name__ == "__main__":
-    main()
+    try:
+        prevent_sleep()
+        main()
+    finally:
+        allow_sleep()
