@@ -24,14 +24,16 @@ from diffusers import (
 )
 from peft import get_peft_model, LoraConfig
 from accelerate import Accelerator
+from lpips import LPIPS
 
 from swapper.utils.image_utils import preprocess_image
 from swapper.utils.embedding_utils import get_face_embedding
+from swapper.models.projectors import EmbeddingProjector
 
 from models.lighting_mlp import LightingMLP
 
 # Debug configuration
-DEBUG_MODE = True  # Set to True to enable detailed debugging output
+DEBUG_MODE = False  # Set to True to enable detailed debugging output
 
 def debug_print(*args, **kwargs):
     """Wrapper for print that only outputs if DEBUG_MODE is True"""
@@ -188,7 +190,7 @@ def prepare_latents(vae, image_tensor, scheduler):
     return noisy_latents, noise, timesteps
 
 # --------------- Training ----------------
-def load_checkpoint(checkpoint_path: Path, pipe, lighting_to_cross, lighting_to_pooled, identity_to_cross, identity_to_pooled, optimizer, lr_scheduler, ema):
+def load_checkpoint(checkpoint_path: Path, pipe, projector, optimizer, lr_scheduler, ema):
     """Load model and training state from checkpoint."""
     print(f"\nLoading checkpoint from: {checkpoint_path}")
     
@@ -196,15 +198,11 @@ def load_checkpoint(checkpoint_path: Path, pipe, lighting_to_cross, lighting_to_
         # Load model weights
         unet_path = checkpoint_path / "unet_lora.pt"
         controlnet_path = checkpoint_path / "controlnet_lora.pt"
-        lighting_cross_path = checkpoint_path / "lighting_to_cross.pt"
-        lighting_pooled_path = checkpoint_path / "lighting_to_pooled.pt"
-        identity_cross_path = checkpoint_path / "identity_to_cross.pt"
-        identity_pooled_path = checkpoint_path / "identity_to_pooled.pt"
+        projector_path = checkpoint_path / "projector.pt"
         training_state_path = checkpoint_path / "training_state.pt"
         
         required_files = [
-            unet_path, controlnet_path, lighting_cross_path, lighting_pooled_path,
-            identity_cross_path, identity_pooled_path, training_state_path
+            unet_path, controlnet_path, projector_path, training_state_path
         ]
         
         if not all(p.exists() for p in required_files):
@@ -213,10 +211,7 @@ def load_checkpoint(checkpoint_path: Path, pipe, lighting_to_cross, lighting_to_
         # Load model weights
         pipe.unet.load_state_dict(torch.load(unet_path))
         pipe.controlnet.load_state_dict(torch.load(controlnet_path))
-        lighting_to_cross.load_state_dict(torch.load(lighting_cross_path))
-        lighting_to_pooled.load_state_dict(torch.load(lighting_pooled_path))
-        identity_to_cross.load_state_dict(torch.load(identity_cross_path))
-        identity_to_pooled.load_state_dict(torch.load(identity_pooled_path))
+        projector.load_state_dict(torch.load(projector_path))
         
         # Load training state
         training_state = torch.load(training_state_path)
@@ -265,12 +260,6 @@ def validate_pipeline_inputs(validation_inputs):
             raise ValueError(f"prompt_embeds must be 3-dimensional, got {validation_inputs['prompt_embeds'].ndim} dimensions")
         if validation_inputs["prompt_embeds"].shape[-1] != 2048:
             raise ValueError(f"prompt_embeds must have shape [..., 2048], got [..., {validation_inputs['prompt_embeds'].shape[-1]}]")
-    
-    if validation_inputs["pooled_prompt_embeds"] is not None:
-        if validation_inputs["pooled_prompt_embeds"].ndim != 2:
-            raise ValueError(f"pooled_prompt_embeds must be 2-dimensional, got {validation_inputs['pooled_prompt_embeds'].ndim} dimensions")
-        if validation_inputs["pooled_prompt_embeds"].shape[-1] != 1280:
-            raise ValueError(f"pooled_prompt_embeds must have shape [..., 1280], got [..., {validation_inputs['pooled_prompt_embeds'].shape[-1]}]")
 
     # 5. Check device consistency
     if validation_inputs["prompt_embeds"] is not None and validation_inputs["pooled_prompt_embeds"] is not None:
@@ -284,6 +273,24 @@ def validate_pipeline_inputs(validation_inputs):
 
     return True
 
+def validate_projector_outputs(combined_cross, controlnet_embeds, pooled_embeds, pipe):
+    """Validate the dimensions of projector outputs."""
+    assert combined_cross.shape[-1] == pipe.unet.config.cross_attention_dim, \
+        f"UNet cross attention dimension mismatch: {combined_cross.shape[-1]} vs {pipe.unet.config.cross_attention_dim}"
+    
+    assert controlnet_embeds.shape[-1] == pipe.controlnet.config.cross_attention_dim, \
+        f"ControlNet cross attention dimension mismatch: {controlnet_embeds.shape[-1]} vs {pipe.controlnet.config.cross_attention_dim}"
+    
+    assert pooled_embeds.shape[-1] == pipe.text_encoder_2.config.projection_dim, \
+        f"Pooled embeddings dimension mismatch: {pooled_embeds.shape[-1]} vs {pipe.text_encoder_2.config.projection_dim}"
+
+def validate_conditioning_inputs(pooled_embeds, batch_size, device):
+    """Validate the conditioning inputs for SDXL."""
+    assert pooled_embeds.ndim == 2, f"Pooled embeddings should be 2D, got {pooled_embeds.ndim}D"
+    assert pooled_embeds.shape[-1] == 1280, f"Pooled embeddings should be 1280-dimensional, got {pooled_embeds.shape[-1]}"
+    assert pooled_embeds.shape[0] == batch_size, f"Batch size mismatch: {pooled_embeds.shape[0]} vs {batch_size}"
+    assert pooled_embeds.device == device, f"Device mismatch: {pooled_embeds.device} vs {device}"
+    return True
 
 def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint: bool = False):
     """Train the model with support for checkpoints and multiple runs."""
@@ -395,27 +402,19 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
         print(f"- Path exists: {os.path.exists(sdxl_cache_path)}")
 
         try:
-            # 1) load the base SDXL pipeline
+            # 1) Load the base SDXL pipeline
             base = StableDiffusionXLPipeline.from_pretrained(
-            sdxl_cache_path,
-            torch_dtype=torch.bfloat16,
-            use_safetensors=True,
+                sdxl_cache_path,
+                torch_dtype=torch.bfloat16,
+                use_safetensors=True,
                 variant="bf16",
             ).to(accelerator.device)
 
-            # 2) clone its UNet into a new ControlNet
+            # 2) Clone UNet into ControlNet without manual dimension modifications
             controlnet = ControlNetModel.from_unet(base.unet)
+            #controlnet.config.addition_embed_type = None
 
-            # Modify the config after creation
-            controlnet.config.cross_attention_dim = 2048  # Match UNet's dimension
-            controlnet.config.conditioning_embedding_out_channels = 2048  # Match cross attention dim
-
-            # Verify the config after modification
-            print("\nControlNet config after modification:")
-            print(f"cross_attention_dim: {controlnet.config.cross_attention_dim}")
-            print(f"conditioning_embedding_out_channels: {controlnet.config.conditioning_embedding_out_channels}")
-
-            # Then create the pipeline with the modified controlnet
+            # 5) Create the pipeline with the properly configured controlnet
             pipe = StableDiffusionXLControlNetPipeline(
                 vae=base.vae,
                 text_encoder=base.text_encoder,
@@ -428,9 +427,7 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                 controlnet=controlnet,
                 scheduler=base.scheduler,
             ).to(accelerator.device)
-        
-            #for name, module in pipe.controlnet.named_modules():
-            #    print(name)
+
         except Exception as e:
             print(f"Error loading SDXL model: {str(e)}")
             import traceback
@@ -443,49 +440,33 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             print(f"- {name}")
 
         # First, create the LoRA config with the correct module names
-        controlnet_lora_config = LoraConfig(
-            r=32,
-            lora_alpha=32,
-            lora_dropout=0.1,
-            target_modules=[
-                # Conditioning embedding
-                "controlnet_cond_embedding.conv_in",
-                "controlnet_cond_embedding.conv_out",
-                # Down blocks
-                "down_blocks.0.resnets.0.conv1",
-                "down_blocks.0.resnets.0.conv2",
-                "down_blocks.0.resnets.1.conv1",
-                "down_blocks.0.resnets.1.conv2",
-                "down_blocks.1.resnets.0.conv1",
-                "down_blocks.1.resnets.0.conv2",
-                "down_blocks.1.resnets.1.conv1",
-                "down_blocks.1.resnets.1.conv2",
-                "down_blocks.2.resnets.0.conv1",
-                "down_blocks.2.resnets.0.conv2",
-                "down_blocks.2.resnets.1.conv1",
-                "down_blocks.2.resnets.1.conv2",
-                # Mid block
-                "mid_block.resnets.0.conv1",
-                "mid_block.resnets.0.conv2",
-                "mid_block.resnets.1.conv1",
-                "mid_block.resnets.1.conv2",
-                # Attention layers
-                "down_blocks.1.attentions.0.transformer_blocks.0.attn1.to_q",
-                "down_blocks.1.attentions.0.transformer_blocks.0.attn1.to_k",
-                "down_blocks.1.attentions.0.transformer_blocks.0.attn1.to_v",
-                "down_blocks.1.attentions.0.transformer_blocks.0.attn2.to_q",
-                "down_blocks.1.attentions.0.transformer_blocks.0.attn2.to_k",
-                "down_blocks.1.attentions.0.transformer_blocks.0.attn2.to_v",
-                "down_blocks.2.attentions.0.transformer_blocks.0.attn1.to_q",
-                "down_blocks.2.attentions.0.transformer_blocks.0.attn1.to_k",
-                "down_blocks.2.attentions.0.transformer_blocks.0.attn1.to_v",
-                "down_blocks.2.attentions.0.transformer_blocks.0.attn2.to_q",
-                "down_blocks.2.attentions.0.transformer_blocks.0.attn2.to_k",
-                "down_blocks.2.attentions.0.transformer_blocks.0.attn2.to_v",
-            ],
-            bias="none",
-            task_type="CONTROLNET"
-        )
+        try:
+            controlnet_lora_config = LoraConfig(
+                r=16,
+                lora_alpha=16,
+                lora_dropout=0.1,
+                target_modules=[
+                    "controlnet_cond_embedding.conv_in",
+                    "controlnet_cond_embedding.conv_out",
+                    # (uncomment the next lines only if you need to tune cross‑attn)
+                    # "controlnet_down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_q",
+                    # "controlnet_down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_k",
+                    # "controlnet_down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_q",
+                    # "controlnet_down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_k",
+                    # "controlnet_mid_block.attentions.*.transformer_blocks.*.attn1.to_q",
+                    # "controlnet_mid_block.attentions.*.transformer_blocks.*.attn1.to_k",
+                    # "controlnet_mid_block.attentions.*.transformer_blocks.*.attn2.to_q",
+                    # "controlnet_mid_block.attentions.*.transformer_blocks.*.attn2.to_k",
+                ],
+                init_lora_weights="gaussian",
+                bias="none",
+                task_type="CONTROLNET"
+            )
+        except Exception as e:
+            print(f"Error creating LoRA config: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            raise
 
         # Then verify the target modules
         def verify_target_modules(model, target_modules):
@@ -511,23 +492,61 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             print("\nAll target modules verified successfully!")
 
         # Now create the PEFT model
-        try:
-            pipe.controlnet = get_peft_model(pipe.controlnet, controlnet_lora_config)
-            pipe.controlnet.train()
-        except Exception as e:
-            print(f"Error creating PEFT model: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-            raise
-        
-        try:
-            pipe.controlnet.to(accelerator.device)
-            pipe.controlnet.enable_gradient_checkpointing()
-        except Exception as e:
-            print(f"Error getting PEFT model: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-            raise
+        pipe.controlnet.eval()
+        for p in pipe.controlnet.parameters():
+            p.requires_grad = False
+
+        # Then, use this corrected fix_attention_dimensions function
+        def fix_attention_dimensions(module):
+            if hasattr(module, "to_k") or hasattr(module, "to_q") or hasattr(module, "to_v"):
+                # All attention layers should operate at 1280 dimensions
+                output_dim = 1280
+                num_heads = 20
+                head_dim = output_dim // num_heads
+                
+                if "attn2" in module.__class__.__name__.lower():
+                    # Cross attention
+                    input_dim = 2048  # encoder hidden states dimension
+                else:
+                    # Self attention - always use 1280
+                    input_dim = 1280
+                
+                # Update all projection layers
+                if hasattr(module, "to_q"):
+                    module.to_q = torch.nn.Linear(input_dim, output_dim, bias=False)
+                if hasattr(module, "to_k"):
+                    module.to_k = torch.nn.Linear(input_dim, output_dim, bias=False)
+                if hasattr(module, "to_v"):
+                    module.to_v = torch.nn.Linear(input_dim, output_dim, bias=False)
+                
+                # Output projection is always to output_dim
+                if hasattr(module, "to_out"):
+                    module.to_out = torch.nn.ModuleList([
+                        torch.nn.Linear(output_dim, output_dim, bias=False),
+                        torch.nn.Dropout(p=0.0)
+                    ])
+                
+                # Update attention parameters
+                module.heads = num_heads
+                module.head_dim = head_dim
+                module.scale = head_dim ** -0.5
+
+        # Add this verification step after applying the fix
+        def verify_attention_block(name, module):
+            if hasattr(module, "to_q"):
+                q_in = module.to_q.in_features
+                q_out = module.to_q.out_features
+                if q_out != 1280:
+                    raise ValueError(f"Incorrect output dimension in {name}.to_q: {q_out} (should be 1280)")
+                
+                # For cross attention, input should be 2048, otherwise 1280
+                expected_in = 2048 if "attn2" in name else 1280
+                if q_in != expected_in:
+                    raise ValueError(f"Incorrect input dimension in {name}.to_q: {q_in} (should be {expected_in})")
+                
+        # Verify the dimensions
+        for model_name, model in [("ControlNet", pipe.controlnet), ("UNet", pipe.unet)]:
+            verify_attention_block(model_name, model)
 
         # After ControlNet LoRA initialization
         debug_print("\n=== Debug: ControlNet LoRA Setup ===")
@@ -541,46 +560,6 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
         for name, module in pipe.controlnet.named_modules():
             if hasattr(module, 'lora_layer'):
                 debug_print(f"- {name}")
-
-        # 6) check one of your LoRA grads
-        try:
-            for name, p in pipe.controlnet.named_parameters():
-                if "lora_" in name:
-                    print(f"{name:40s} → requires_grad={p.requires_grad}")
-
-            cnet = pipe.controlnet
-            c_emb = pipe.controlnet.controlnet_cond_embedding
-            cnet.train()
-
-            # Freeze non‑LoRA
-            for n,p in c_emb.named_parameters():
-                p.requires_grad = ("lora_" in n)
-
-            # Check that we actually replaced convs
-            print("conv_in type:", type(c_emb.conv_in))
-            print("conv_out type:", type(c_emb.conv_out))
-
-            # Dummy forward/backward
-            dummy = torch.randn(1, 3, 256, 256, dtype=torch.float32, device=c_emb.conv_in.weight.device)
-            out   = pipe.controlnet.controlnet_cond_embedding(dummy)      # [1,C',H',W']
-            loss  = out.abs().mean()
-            loss.backward()
-
-            # Inspect grads
-            found = False
-            for n, p in pipe.controlnet.controlnet_cond_embedding.named_parameters():
-                if "lora_A" in n:
-                    print(f"{n:60s} → grad norm = {p.grad.norm():.3e}")
-                    found = True
-                    break
-
-            if not found:
-                print("❌ zero grads on every LoRA weight — something still isn't hooked up")
-        except Exception as e:
-            print(f"Error getting PEFT model: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-            raise
         
         # DEBUG: how many params are trainable?
         total = sum(p.numel() for p in pipe.controlnet.parameters())
@@ -705,43 +684,21 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
         print("❗ ControlNet trainable params:", 
             sum(p.numel() for p in pipe.controlnet.parameters() if p.requires_grad))
 
-        # Lighting MLP
-        cross_attention_dim = pipe.unet.config.cross_attention_dim  # should be 2048
-        pooled_dim          = pipe.text_encoder_2.config.projection_dim  # 1280
-        ctrl_dim = pipe.controlnet.config.projection_class_embeddings_input_dim  # Should be 2816, not 1024
-        
-        # maps your 128‑dim face embedding → cross‑attention space
-        identity_to_cross = torch.nn.Sequential(
-            torch.nn.Linear(128, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, cross_attention_dim),
-        )
-        # maps your 128‑dim lighting → cross‑attention space
-        lighting_to_cross = torch.nn.Sequential(
-            torch.nn.Linear(config["model"]["lighting_dim"], hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, cross_attention_dim),
+        # Initialize projector with correct dimensions
+        projector = EmbeddingProjector(
+            config=config,
+            unet_dim=pipe.unet.config.cross_attention_dim,  # 2048
+            controlnet_dim=pipe.controlnet.config.cross_attention_dim  # 2048
         )
 
-        # you need two more heads:
-        identity_to_pooled = torch.nn.Sequential(
-            torch.nn.Linear(128, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, pooled_dim),
-        )
-        lighting_to_pooled = torch.nn.Sequential(
-            torch.nn.Linear(config["model"]["lighting_dim"], hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, pooled_dim),
-        )
+        # Move to device and prepare with accelerator
+        projector = projector.to(accelerator.device)
+        projector = accelerator.prepare(projector)
 
+        # Update optimizer to use only UNet and projector parameters
         optimizer = torch.optim.Adam(
             list(pipe.unet.parameters()) +
-            [p for p in pipe.controlnet.parameters() if p.requires_grad] +
-            list(lighting_to_cross.parameters()) +
-            list(lighting_to_pooled.parameters()) +
-            list(identity_to_cross.parameters()) +
-            list(identity_to_pooled.parameters()),
+            list(projector.parameters()),  # Remove ControlNet parameters
             lr=float(config["training"]["learning_rate"])
         )
 
@@ -777,10 +734,7 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             checkpoint_state = load_checkpoint(
                 latest_checkpoint,
                 pipe,
-                lighting_to_cross,
-                lighting_to_pooled,
-                identity_to_cross,
-                identity_to_pooled,
+                projector,
                 optimizer,
                 lr_scheduler,
                 ema
@@ -801,43 +755,19 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                 from_checkpoint = False
 
         # Prepare models AFTER loading checkpoint
-        pipe.unet, pipe.controlnet, lighting_to_cross, lighting_to_pooled, \
-        identity_to_cross, identity_to_pooled, \
+        pipe.unet, pipe.controlnet, projector, \
         optimizer, train_loader, val_loader = accelerator.prepare(
-            pipe.unet, pipe.controlnet, lighting_to_cross, lighting_to_pooled,
-            identity_to_cross, identity_to_pooled,
+            pipe.unet, pipe.controlnet, projector,
             optimizer, train_loader, val_loader
         )
-
-        # Add this after ControlNet initialization
-        print("\n=== Debug: Model Dimensions ===")
-        print(f"UNet cross attention dim: {pipe.unet.config.cross_attention_dim}")
-        print(f"ControlNet cross attention dim: {pipe.controlnet.config.cross_attention_dim}")
-        print(f"ControlNet projection dim: {pipe.controlnet.config.projection_class_embeddings_input_dim}")
-
-        # Also check the actual attention blocks
-        for name, module in pipe.controlnet.named_modules():
-            if "attn" in name:
-                print(f"\nAttention module: {name}")
-                if hasattr(module, "to_q"):
-                    print(f"Query dim: {module.to_q.in_features}")
-                if hasattr(module, "to_k"):
-                    print(f"Key dim: {module.to_k.in_features}")
-                if hasattr(module, "to_v"):
-                    print(f"Value dim: {module.to_v.in_features}")
 
         # Training loop
         best_loss = float('inf')
         patience = config["training"].get("patience", 5)
         patience_counter = 0
 
-        def init_weights(m):
-            if isinstance(m, (torch.nn.Conv2d, torch.nn.Linear)):
-                torch.nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    torch.nn.init.zeros_(m.bias)
-
-        pipe.controlnet.apply(init_weights)
+        # Near the beginning of your train function, after creating the accelerator
+        lpips_model = LPIPS(net='vgg').to(accelerator.device)
 
         for epoch in range(start_epoch, config["training"]["num_epochs"]):
             total_loss = 0
@@ -850,20 +780,9 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                         identity = F.normalize(batch["embedding"].to(accelerator.device), dim=-1)
                         lighting = F.normalize(batch["lighting"].to(accelerator.device), dim=-1)
 
-                        # For UNet - use 2048-dim cross attention
-                        id_cross = identity_to_cross(identity)      # [B, 2048]
-                        light_cross = lighting_to_cross(lighting)   # [B, 2048]
-                        combined_cross = (id_cross + light_cross).unsqueeze(1)  # [B,1,2048]
-
-                        # Before ControlNet forward pass
-                        debug_print("\n=== Debug: Tensor Dimensions ===")
-                        debug_print(f"combined_cross shape: {combined_cross.shape}")
-                        debug_print(f"ControlNet cross attention dim: {pipe.controlnet.config.cross_attention_dim}")
-                        debug_print(f"UNet cross attention dim: {pipe.unet.config.cross_attention_dim}")
-
-                        # Add dimension check
-                        assert combined_cross.shape[-1] == pipe.controlnet.config.cross_attention_dim, \
-                            f"Expected cross attention dim {pipe.controlnet.config.cross_attention_dim}, got {combined_cross.shape[-1]}"
+                        # For UNet and ControlNet only
+                        combined_cross = projector(identity, lighting, target="unet")  # For UNet
+                        controlnet_embeds = projector(identity, lighting, target="controlnet")  # For ControlNet
 
                         # First prepare the latents
                         debug_print("\n=== Debug: Before prepare_latents ===")
@@ -874,16 +793,13 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                         # Prepare latents
                         noisy_latents, noise, timesteps = prepare_latents(pipe.vae, image, noise_scheduler)
 
+                        noisy_latents = noisy_latents.requires_grad_(True)
+                        noise = noise.detach()  # We don't need gradients for the target noise
+
                         debug_print("\n=== Debug: After prepare_latents ===")
                         debug_print(f"Noisy latents: shape={noisy_latents.shape}, dtype={noisy_latents.dtype}")
                         debug_print(f"Noise: shape={noise.shape}, dtype={noise.dtype}")
                         debug_print(f"Timesteps: shape={timesteps.shape}, dtype={timesteps.dtype}")
-
-                        # Create added conditioning kwargs
-                        added_cond_kwargs = {
-                            "text_embeds": torch.zeros(image.shape[0], 1280).to(accelerator.device),
-                            "time_ids": torch.zeros(image.shape[0], 6).to(accelerator.device)
-                        }
 
                         # Now verify all shapes after everything is created
                         debug_print("\n=== Debug: Final Input Tensor Shapes ===")
@@ -891,90 +807,151 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                         debug_print(f"timesteps: {timesteps.shape} (expected: [batch_size])")
                         debug_print(f"encoder_hidden_states: {combined_cross.shape} (expected: [batch_size, 1, 2048])")
                         debug_print(f"controlnet_cond: {normal_map.shape} (expected: [batch_size, 3, height, width])")
-                        for k, v in added_cond_kwargs.items():
-                            debug_print(f"{k}: {v.shape}")
 
-                        # Verify all shapes are correct
+                        debug_print("\nInput tensor details:")
+                        debug_print(f"noisy_latents - shape: {noisy_latents.shape}, dtype: {noisy_latents.dtype}, device: {noisy_latents.device}")
+                        debug_print(f"timesteps - shape: {timesteps.shape}, dtype: {timesteps.dtype}, device: {timesteps.device}")
+                        debug_print(f"encoder_hidden_states - shape: {controlnet_embeds.shape}, dtype: {controlnet_embeds.dtype}, device: {controlnet_embeds.device}")
+                        debug_print(f"controlnet_cond - shape: {normal_map.shape}, dtype: {normal_map.dtype}, device: {normal_map.device}")
+
+                        # Inside the training loop, add this before the ControlNet forward pass
                         try:
-                            assert noisy_latents.shape[1] == 4, f"Expected 4 channels in latents, got {noisy_latents.shape[1]}"
-                            assert normal_map.shape[1] == 3, f"Expected 3 channels in normal map, got {normal_map.shape[1]}"
-                            assert combined_cross.shape[-1] == cross_attention_dim, \
-                                f"Expected hidden size of {cross_attention_dim}, got {combined_cross.shape[-1]}"
-                        except AssertionError as e:
-                            print(f"❌ Verification failed: {str(e)}")
-                            raise
+                            with torch.autograd.detect_anomaly():
+                                # Track inputs for gradient flow
+                                try:
+                                    debug_print("\n=== Input Gradient Tracking ===")
+                                    debug_print(f"noisy_latents requires_grad: {noisy_latents.requires_grad}")
+                                    debug_print(f"timesteps requires_grad: {timesteps.requires_grad}")
+                                    debug_print(f"encoder_hidden_states requires_grad: {controlnet_embeds.requires_grad}")
+                                    debug_print(f"normal_map requires_grad: {normal_map.requires_grad}")
+                                except Exception as e:
+                                    debug_print(f"Error tracking input gradients: {str(e)}")
+                                              
+                                # Prepare the added_cond_kwargs with proper dimensions
+                                added_cond_kwargs = {
+                                    "text_embeds": torch.zeros(controlnet_embeds.size(0), 1280, device=controlnet_embeds.device),
+                                    "time_ids": torch.zeros(controlnet_embeds.size(0), 6, device=controlnet_embeds.device)
+                                }
 
-                        # Before ControlNet forward pass
-                        debug_print("\n=== Debug: ControlNet State ===")
-                        debug_print(f"ControlNet training mode: {pipe.controlnet.training}")
-                        debug_print(f"ControlNet device: {pipe.controlnet.device}")
+                                # Always run ControlNet in inference mode
+                                with torch.no_grad():
+                                    down_block_res_samples, mid_block_res_sample = pipe.controlnet(
+                                        noisy_latents,
+                                        timesteps,
+                                        encoder_hidden_states=controlnet_embeds,
+                                        controlnet_cond=normal_map,
+                                        added_cond_kwargs=added_cond_kwargs,  # Add this parameter
+                                        return_dict=False,
+                                    )
 
-                        # Check input tensors
-                        debug_print("\nInput tensor stats:")
-                        debug_print(f"normal_map - min: {normal_map.min()}, max: {normal_map.max()}, mean: {normal_map.mean()}")
-                        debug_print(f"noisy_latents - min: {noisy_latents.min()}, max: {noisy_latents.max()}, mean: {noisy_latents.mean()}")
-
-                        # Add this before the ControlNet forward pass
-                        for param in pipe.controlnet.parameters():
-                            if param.requires_grad:
-                                param.retain_grad()
-
-                        # ControlNet forward pass
-                        try:
-                            down_block_res_samples, mid_block_res_sample = pipe.controlnet(
-                                noisy_latents,
-                                timesteps,
-                                encoder_hidden_states=combined_cross,  # Use 2048-dim for ControlNet
-                                controlnet_cond=normal_map,
-                                added_cond_kwargs=added_cond_kwargs,
-                                return_dict=False,
-                            )
                         except Exception as e:
-                            print(f"Error in ControlNet forward pass: {str(e)}")
+                            debug_print(f"Error in ControlNet forward tracking: {str(e)}")
                             import traceback
-                            print(traceback.format_exc())
-                            raise
+                            debug_print(traceback.format_exc())
 
-                        debug_print("\n=== Debug: Post-ControlNet Forward Pass ===")
-                        debug_print(f"Forward pass successful")
-                        debug_print(f"Number of down block samples: {len(down_block_res_samples)}")
-                        for i, sample in enumerate(down_block_res_samples):
-                            debug_print(f"- Down block {i} shape: {sample.shape}")
-                        debug_print(f"Mid block sample shape: {mid_block_res_sample.shape}")
+                        # After backward pass, add this
+                        try:
+                            debug_print("\n=== Post-Backward Gradient Check ===")
+                            missing_grads = []
+                            zero_grads = []
+                            for name, param in pipe.controlnet.named_parameters():
+                                if param.requires_grad:
+                                    if param.grad is None:
+                                        missing_grads.append(name)
+                                    elif param.grad.norm().item() == 0:
+                                        zero_grads.append(name)
+                                    else:
+                                        debug_print(f"Gradient present for {name}: {param.grad.norm().item():.6f}")
 
-                        # Before UNet forward pass
-                        debug_print("\n=== Debug: Residual Connections ===")
-                        debug_print(f"Down block residuals stats:")
-                        for i, res in enumerate(down_block_res_samples):
-                            debug_print(f"- Block {i}: min={res.min().item():.4f}, max={res.max().item():.4f}, mean={res.mean().item():.4f}")
-                        debug_print(f"Mid block residual stats: min={mid_block_res_sample.min().item():.4f}, max={mid_block_res_sample.max().item():.4f}, mean={mid_block_res_sample.mean().item():.4f}")
+                            if missing_grads:
+                                debug_print(f"\nWARNING: {len(missing_grads)} parameters have missing gradients:")
+                                for name in missing_grads[:10]:  # Print first 10
+                                    debug_print(f"- {name}")
+                                if len(missing_grads) > 10:
+                                    debug_print(f"... and {len(missing_grads) - 10} more")
 
-                        # After the ControlNet forward pass
-                        debug_print("\n=== Debug: ControlNet Gradients ===")
-                        for name, param in pipe.controlnet.named_parameters():
-                            if param.requires_grad:
-                                debug_print(f"Before backward - {name}:")
-                                debug_print(f"- requires_grad: {param.requires_grad}")
-                                debug_print(f"- has_grad: {param.grad is not None}")
-                                if param.grad is not None:
-                                    debug_print(f"- grad_norm: {param.grad.norm().item()}")
+                            if zero_grads:
+                                debug_print(f"\nWARNING: {len(zero_grads)} parameters have zero gradients:")
+                                for name in zero_grads[:10]:  # Print first 10
+                                    debug_print(f"- {name}")
+                                if len(zero_grads) > 10:
+                                    debug_print(f"... and {len(zero_grads) - 10} more")
+                        except Exception as e:
+                            debug_print(f"Error in post-backward gradient check: {str(e)}")
 
                         # Use same conditioning in UNet
                         try:
+                            # Create the same added_cond_kwargs that was used for ControlNet
+                            added_cond_kwargs = {
+                                "text_embeds": torch.zeros(combined_cross.size(0), 1280, device=combined_cross.device),
+                                "time_ids": torch.zeros(combined_cross.size(0), 6, device=combined_cross.device)
+                            }
+
                             noise_pred = pipe.unet(
                                 noisy_latents,
                                 timesteps,
                                 encoder_hidden_states=combined_cross,  # Use 2048-dim for UNet
                                 down_block_additional_residuals=down_block_res_samples,
                                 mid_block_additional_residual=mid_block_res_sample,
-                                added_cond_kwargs=added_cond_kwargs
+                                added_cond_kwargs=added_cond_kwargs,  # Add this parameter
                             ).sample
 
-                            diffusion_loss = loss_fn(noise_pred, noise)
-                            cosine_loss = cosine_loss_fn(combined_cross.squeeze(1), id_cross, torch.ones(id_cross.size(0)).to(accelerator.device))
+                            # Modify loss computation to ensure gradients are maintained
+                            diffusion_loss = F.mse_loss(noise_pred.float(), noise.float())
+                            a = combined_cross
+                            b = controlnet_embeds
+
+                            if a.ndim == 3:
+                                a = a.squeeze(1)
+                            if b.ndim == 3:
+                                b = b.squeeze(1)
+
+                            assert a.shape == b.shape, f"Mismatched projector shapes: {a.shape} vs {b.shape}"
+
+                            cosine_loss = cosine_loss_fn(
+                                a.float(),
+                                b.float(),
+                                torch.ones(a.size(0), device=a.device)
+                            )
                             controlnet_loss = sum(res.abs().mean() for res in down_block_res_samples)
                             controlnet_loss += mid_block_res_sample.abs().mean()
-                            total_loss = 2 * diffusion_loss + config["training"].get("lambda_identity", 0.5) * cosine_loss + 0.1 * controlnet_loss
+
+                            # Use LPIPS for perceptual similarity
+                            lpips_loss = F.mse_loss(noise_pred, noise)  # Just use MSE in latent space
+                            
+                            # Extract lighting features from generated and target images
+                            # You can use a simple MLP for this
+                            #lighting_pred = lighting_extractor(decoded)
+                            #lighting_target = batch["lighting"]
+                            
+                            #lighting_loss = F.mse_loss(lighting_pred, lighting_target)
+                            
+                            # Using a pre-trained facial landmark detector
+                            #landmark_loss = landmark_detector.get_landmark_loss(decoded, image)
+                            
+                            # Use a pre-trained normal map estimator to predict normals from generated image
+                            #predicted_normal = normal_estimator(decoded)
+                            #normal_loss = F.mse_loss(predicted_normal, normal_map)
+                            
+                            total_loss = (
+                                1.0 * diffusion_loss +       # Standard diffusion objective
+                                0.5 * cosine_loss +          # Identity preservation
+                                0.3 * lpips_loss            # Perceptual similarity
+                                #0.3 * lighting_loss +        # Lighting consistency
+                                #0.2 * landmark_loss +        # Facial structure preservation
+                                #0.3 * normal_loss            # Normal map consistency
+                            )
+
+                            # After loss calculation, add this
+                            try:
+                                debug_print("\n=== Loss Gradient Flow ===")
+                                debug_print(f"diffusion_loss: {diffusion_loss.item():.6f}, requires_grad: {diffusion_loss.requires_grad}")
+                                debug_print(f"cosine_loss: {cosine_loss.item():.6f}, requires_grad: {cosine_loss.requires_grad}")
+                                debug_print(f"controlnet_loss: {controlnet_loss.item():.6f}, requires_grad: {controlnet_loss.requires_grad}")
+                                debug_print(f"total_loss: {total_loss.item():.6f}, requires_grad: {total_loss.requires_grad}")
+                                debug_print(f"total_loss.grad_fn: {total_loss.grad_fn}")
+                            except Exception as e:
+                                debug_print(f"Error in loss gradient flow tracking: {str(e)}")
 
                             accelerator.backward(total_loss)
 
@@ -1000,15 +977,10 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                             
                             # Calculate gradients statistics
                             grad_norm_unet = 0.0
-                            grad_norm_controlnet = 0.0
                             for name, param in pipe.unet.named_parameters():
                                 if param.grad is not None:
                                     grad_norm_unet += param.grad.data.norm(2).item() ** 2
-                            for name, param in pipe.controlnet.named_parameters():
-                                if param.grad is not None:
-                                    grad_norm_controlnet += param.grad.data.norm(2).item() ** 2
                             grad_norm_unet = grad_norm_unet ** 0.5
-                            grad_norm_controlnet = grad_norm_controlnet ** 0.5
                             
                             # Log statistics
                             accelerator.print(
@@ -1022,7 +994,6 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                                 f"- Identity: {cosine_loss.item():.4f}\n"
                                 f"Gradient Norms:\n"
                                 f"- UNet: {grad_norm_unet:.4f}\n"
-                                f"- ControlNet: {grad_norm_controlnet:.4f}\n"
                                 f"Memory:\n"
                                 f"- Allocated: {torch.cuda.memory_allocated()/1024**2:.1f}MB\n"
                                 f"- Reserved: {torch.cuda.memory_reserved()/1024**2:.1f}MB\n"
@@ -1049,11 +1020,7 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                                 # Save files and verify
                                 checkpoint_files = {
                                     "unet_lora.pt": unet_lora_state_dict,
-                                    "controlnet_lora.pt": controlnet_lora_state_dict,
-                                    "lighting_to_cross.pt": lighting_to_cross.state_dict(),
-                                    "lighting_to_pooled.pt": lighting_to_pooled.state_dict(),
-                                    "identity_to_cross.pt": identity_to_cross.state_dict(),
-                                    "identity_to_pooled.pt": identity_to_pooled.state_dict(),
+                                    "projector.pt": projector.state_dict(),
                                     "training_state.pt": {
                                         "step": step,
                                         "epoch": epoch,
@@ -1077,80 +1044,92 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                             accelerator.print("\nGenerating preview image...")
                             
                             try:
-                                # Ensure models are in eval mode
+                                # 1) Put everything in eval
                                 ema.store(pipe.unet.parameters())
                                 ema.copy_to(pipe.unet.parameters())
                                 pipe.unet.eval()
                                 pipe.controlnet.eval()
                                 pipe.vae.eval()
-                            
+
                                 device = accelerator.device
-                                
-                                # Get sample normal map and normalize it to [0, 1] range
-                                sample_normal = batch["normal_map"][0:1].to(device, dtype=torch.bfloat16)
-                                # Normalize from [-1, 1] to [0, 1]
-                                sample_normal = (sample_normal + 1.0) / 2.0
-                                # Clamp to ensure we're exactly in [0, 1]
-                                sample_normal = torch.clamp(sample_normal, 0.0, 1.0)
-                                
-                                debug_print(f"\nNormalized normal map stats:")
-                                debug_print(f"Min: {sample_normal.min():.4f}")
-                                debug_print(f"Max: {sample_normal.max():.4f}")
-                                debug_print(f"Mean: {sample_normal.mean():.4f}")
-                                debug_print(f"Std: {sample_normal.std():.4f}")
-                                
-                                # Process embeddings exactly like in training loop
+
+                                # 2) Prepare normal map in [0,1], float32
+                                sample_normal = batch["normal_map"][0:1].to(device)
+                                sample_normal = ((sample_normal + 1.0) / 2.0).clamp(0, 1).to(torch.float32)
+
+                                # 3) Build your embeddings
                                 raw_id = F.normalize(batch["embedding"][0:1].to(device), dim=-1)
                                 raw_light = F.normalize(batch["lighting"][0:1].to(device), dim=-1)
 
-                                # Create embeddings once
-                                id_cross = identity_to_cross(raw_id).to(dtype=torch.bfloat16)      # [1,2048]
-                                light_cross = lighting_to_cross(raw_light).to(dtype=torch.bfloat16)  # [1,2048]
-                                combined_cross = (id_cross + light_cross).unsqueeze(1)               # [1,1,2048]
+                                unet_emb = projector(raw_id, raw_light, target="unet")
+                                ctrl_emb = projector(raw_id, raw_light, target="controlnet")
 
-                                # Before ControlNet forward pass
-                                print("\nVerifying dimensions before preview generation:")
-                                print(f"combined_cross shape: {combined_cross.shape}")
-                                print(f"ControlNet cross attention dim: {pipe.controlnet.config.cross_attention_dim}")
-                                
-                                # Ensure dimensions match
-                                assert combined_cross.shape[-1] == pipe.controlnet.config.cross_attention_dim, \
-                                    f"Dimension mismatch: combined_cross ({combined_cross.shape[-1]}) vs ControlNet ({pipe.controlnet.config.cross_attention_dim})"
-                                
-                                # Use the same embeddings for both models
-                                down_samples, mid_sample = pipe.controlnet(
-                                    noisy_latents,
-                                    timesteps,
-                                    encoder_hidden_states=combined_cross,
-                                    controlnet_cond=sample_normal,
-                                    added_cond_kwargs=added_cond_kwargs,
-                                    return_dict=False,
+                                # 4) Prepare latents & timesteps
+                                noisy_latents, noise, timesteps = prepare_latents(
+                                    pipe.vae,
+                                    batch["pixel_values"][0:1].to(device, dtype=pipe.vae.dtype),
+                                    noise_scheduler
                                 )
+                                noisy_latents = noisy_latents.requires_grad_(False)
 
-                                # Use 2048-dim for UNet
-                                noise_pred = pipe.unet(
-                                    noisy_latents,
-                                    timesteps,
-                                    encoder_hidden_states=combined_cross,  # Use 2048-dim for UNet
-                                    down_block_additional_residuals=down_samples,
-                                    mid_block_additional_residual=mid_sample,
-                                    added_cond_kwargs=added_cond_kwargs,
-                                ).sample
+                                # In the preview generation code
+                                added_cond_kwargs = {
+                                    "text_embeds": torch.zeros(ctrl_emb.size(0), 1280, device=ctrl_emb.device),
+                                    "time_ids": torch.zeros(ctrl_emb.size(0), 6, device=ctrl_emb.device)
+                                }
 
-                                # 5)  Denoise one step (or full 25‑step loop if you like)
-                                prev_sample = noise_scheduler.step(noise_pred, timesteps, noisy_latents).prev_sample
+                                with torch.no_grad():
+                                    # 6) ControlNet forward
+                                    down_samples, mid_sample = pipe.controlnet(
+                                        noisy_latents,
+                                        timesteps,
+                                        encoder_hidden_states=ctrl_emb,
+                                        controlnet_cond=sample_normal,
+                                        added_cond_kwargs=added_cond_kwargs,
+                                        return_dict=False,
+                                    )
 
-                                # 6)  Decode to image
-                                decoded = pipe.vae.decode(prev_sample / 0.18215).sample  # [1,3,512,512] float32
-                                decoded = (decoded / 2 + 0.5).clamp(0,1)  # scale from [-1,1]→[0,1]
+                                    # 7) UNet forward
+                                    noise_pred = pipe.unet(
+                                        noisy_latents,
+                                        timesteps,
+                                        encoder_hidden_states=unet_emb,
+                                        down_block_additional_residuals=down_samples,
+                                        mid_block_additional_residual=mid_sample,
+                                        added_cond_kwargs=added_cond_kwargs,  # Add this parameter
+                                    ).sample
 
-                                # 6)  Save
-                                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                                preview_path = output_dir / "previews" / f"preview_e{epoch}_s{global_step}_{timestamp}.png"
-                                preview_path.parent.mkdir(parents=True, exist_ok=True)
-                                save_image(decoded, str(preview_path))
-                                accelerator.print(f"Preview saved to {preview_path}")
+                                    # 8) One-step denoise + decode
+                                    # Move timesteps to CPU to match the scheduler's internal tensors
+                                    cpu_timesteps = timesteps.cpu()
+                                    
+                                    # Run scheduler with CPU tensors
+                                    latents = noise_scheduler.step(
+                                        noise_pred.detach().cpu(), 
+                                        cpu_timesteps, 
+                                        noisy_latents.detach().cpu()
+                                    ).prev_sample
+                                    
+                                    # Move results back to GPU for the rest of processing
+                                    latents = latents.to(device)
+                                    
+                                    # Decode to pixel space
+                                    decoded_images = pipe.vae.decode(latents / 0.18215).sample
+                                    # Scale to [0,1] range
+                                    decoded_images = (decoded_images / 2 + 0.5).clamp(0, 1)
 
+                                # Create a side-by-side comparison
+                                comparison = torch.cat([
+                                    sample_normal,  # Original normal map
+                                    decoded_images,  # Generated image
+                                ], dim=3)  # Concatenate horizontally
+
+                                # Save the comparison
+                                preview_path = output_dir / "previews" / f"preview_e{epoch}_s{global_step}.png"
+                                preview_path.parent.mkdir(exist_ok=True, parents=True)
+                                save_image(comparison, str(preview_path))
+                                accelerator.print(f"✅ Preview saved to {preview_path}")
+                                
                             except Exception as e:
                                 debug_print("\n=== Preview Generation Failed ===")
                                 debug_print(f"Error type: {type(e).__name__}")
@@ -1180,38 +1159,29 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                     identity = F.normalize(batch["embedding"].to(accelerator.device), dim=-1)
                     lighting = F.normalize(batch["lighting"].to(accelerator.device), dim=-1)
 
-                    # Use the existing identity_projection
-                    id_cross = identity_to_cross(identity)  # This uses the properly initialized projection
-                    light_cross = lighting_to_cross(lighting)
-                    combined_cross = (id_cross + light_cross).unsqueeze(1)
+                    # Use the existing projector
+                    combined_cross = projector(identity, lighting, target="unet")  # For UNet
+                    controlnet_embeds = projector(identity, lighting, target="controlnet")  # For ControlNet
 
                     noisy_latents, noise, timesteps = prepare_latents(pipe.vae, image, noise_scheduler)
-                    added_cond_kwargs = {
-                        "text_embeds": torch.zeros(image.shape[0], 1280).to(accelerator.device),
-                        "time_ids": torch.zeros(image.shape[0], 6).to(accelerator.device)
-                    }
-
-                    # Before ControlNet forward pass
-                    debug_print("\n=== Debug: ControlNet Input Details ===")
-                    debug_print(f"ControlNet config:")
-                    debug_print(f"- cross_attention_dim: {pipe.controlnet.config.cross_attention_dim}")
-                    debug_print(f"- addition_embed_type: {pipe.controlnet.config.addition_embed_type}")
-                    debug_print(f"- projection_class_embeddings_input_dim: {pipe.controlnet.config.projection_class_embeddings_input_dim}")
                     
                     debug_print("\nInput tensor details:")
                     debug_print(f"noisy_latents - shape: {noisy_latents.shape}, dtype: {noisy_latents.dtype}, device: {noisy_latents.device}")
                     debug_print(f"timesteps - shape: {timesteps.shape}, dtype: {timesteps.dtype}, device: {timesteps.device}")
                     debug_print(f"encoder_hidden_states - shape: {combined_cross.shape}, dtype: {combined_cross.dtype}, device: {combined_cross.device}")
                     debug_print(f"controlnet_cond - shape: {normal_map.shape}, dtype: {normal_map.dtype}, device: {normal_map.device}")
-                    debug_print("\nAdded conditioning kwargs:")
-                    for k, v in added_cond_kwargs.items():
-                        debug_print(f"- {k}: shape={v.shape}, dtype={v.dtype}, device={v.device}")
+
+                    # In the validation loop
+                    added_cond_kwargs = {
+                        "text_embeds": torch.zeros(controlnet_embeds.size(0), 1280, device=controlnet_embeds.device),
+                        "time_ids": torch.zeros(controlnet_embeds.size(0), 6, device=controlnet_embeds.device)
+                    }
 
                     # ControlNet forward pass
                     down_block_res_samples, mid_block_res_sample = pipe.controlnet(
                         noisy_latents,
                         timesteps,
-                        encoder_hidden_states=combined_cross,
+                        encoder_hidden_states=controlnet_embeds,
                         controlnet_cond=normal_map,
                         added_cond_kwargs=added_cond_kwargs,
                         return_dict=False,
@@ -1224,13 +1194,19 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                     debug_print(f"Mid block sample shape: {mid_block_res_sample.shape}")
 
                     try:
+                        # Create the same added_cond_kwargs that was used for ControlNet
+                        added_cond_kwargs = {
+                            "text_embeds": torch.zeros(combined_cross.size(0), 1280, device=combined_cross.device),
+                            "time_ids": torch.zeros(combined_cross.size(0), 6, device=combined_cross.device)
+                        }
+
                         noise_pred = pipe.unet(
                             noisy_latents,
                             timesteps,
-                            encoder_hidden_states=combined_cross,
+                            encoder_hidden_states=combined_cross,  # Use 2048-dim for UNet
                             down_block_additional_residuals=down_block_res_samples,
                             mid_block_additional_residual=mid_block_res_sample,
-                            added_cond_kwargs=added_cond_kwargs
+                            added_cond_kwargs=added_cond_kwargs,  # Add this parameter
                         ).sample
                     except Exception as e:
                         print(f"Error in unet: {str(e)}")
@@ -1239,8 +1215,22 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                         raise
 
                     try:
-                        diffusion_loss = loss_fn(noise_pred, noise)
-                        cosine_loss = cosine_loss_fn(combined_cross.squeeze(1), id_cross, torch.ones(id_cross.size(0)).to(accelerator.device))
+                        diffusion_loss = F.mse_loss(noise_pred.float(), noise.float())
+                        a = combined_cross
+                        b = controlnet_embeds
+
+                        if a.ndim == 3:
+                            a = a.squeeze(1)
+                        if b.ndim == 3:
+                            b = b.squeeze(1)
+
+                        assert a.shape == b.shape, f"Mismatched projector shapes: {a.shape} vs {b.shape}"
+
+                        cosine_loss = cosine_loss_fn(
+                            a.float(),
+                            b.float(),
+                            torch.ones(a.size(0), device=a.device)
+                        )
                         val_loss = diffusion_loss + config["training"].get("lambda_identity", 0.5) * cosine_loss
                     except Exception as e:
                         print(f"Error in loss calculation: {str(e)}")
@@ -1288,11 +1278,7 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                     
                     # Save LoRA state dicts directly
                     torch.save(unwrapped_unet.state_dict(), best_model_path / "unet_lora.pt")
-                    torch.save(unwrapped_controlnet.state_dict(), best_model_path / "controlnet_lora.pt")
-                    
-                    # Save other components
-                    torch.save(lighting_to_cross.state_dict(), best_model_path / "lighting_to_cross.pt")
-                    torch.save(lighting_to_pooled.state_dict(), best_model_path / "lighting_to_pooled.pt")
+                    torch.save(projector.state_dict(), best_model_path / "projector.pt")
                     
                     # Save training state
                     training_state = {
@@ -1323,11 +1309,7 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             
             # Save all model components
             torch.save(unwrapped_unet.state_dict(), final_path / "unet_lora.pt")
-            torch.save(unwrapped_controlnet.state_dict(), final_path / "controlnet_lora.pt")
-            torch.save(lighting_to_cross.state_dict(), final_path / "lighting_to_cross.pt")
-            torch.save(lighting_to_pooled.state_dict(), final_path / "lighting_to_pooled.pt")
-            torch.save(identity_to_cross.state_dict(), final_path / "identity_to_cross.pt")
-            torch.save(identity_to_pooled.state_dict(), final_path / "identity_to_pooled.pt")
+            torch.save(projector.state_dict(), final_path / "projector.pt")
             
             # Save final training state
             training_state = {
@@ -1348,6 +1330,8 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                     debug_print(f"- param_norm: {param.norm().item()}")
                     if param.grad is not None:
                         debug_print(f"- grad_norm: {param.grad.norm().item()}")
+
+        debug_print(pipe.controlnet.base_model.controlnet_cond_embedding.conv_in.lora_A.default.weight.grad.norm())
 
         # After backward pass
         debug_print("\n=== Debug: Gradient Flow ===")
@@ -1376,24 +1360,6 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
         debug_print(f"ControlNet config: {pipe.controlnet.config}")
         debug_print(f"VAE config: {pipe.vae.config}")
 
-        # After applying LoRA to controlnet
-        pipe.controlnet = get_peft_model(pipe.controlnet, controlnet_lora_config)
-        pipe.controlnet.train()
-
-        # Add verification of dimensions
-        print("\nVerifying ControlNet dimensions after LoRA:")
-        print(f"cross_attention_dim: {pipe.controlnet.config.cross_attention_dim}")
-        print(f"projection_class_embeddings_input_dim: {pipe.controlnet.config.projection_class_embeddings_input_dim}")
-
-        # If dimensions are wrong, fix them
-        pipe.controlnet.config.cross_attention_dim = 2048
-        pipe.controlnet.config.conditioning_embedding_out_channels = 2048
-
-        # Verify again
-        print("\nControlNet dimensions after fix:")
-        print(f"cross_attention_dim: {pipe.controlnet.config.cross_attention_dim}")
-        print(f"projection_class_embeddings_input_dim: {pipe.controlnet.config.projection_class_embeddings_input_dim}")
-
         return {
             "status": "success",
             "message": f"Training completed for {character_name}",
@@ -1406,3 +1372,30 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             "status": "error",
             "message": error_msg
         }
+
+def save_checkpoint(checkpoint_path: Path, pipe, projector, optimizer, lr_scheduler, ema, step, epoch, config):
+    """Save model and training state to checkpoint."""
+    try:
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        
+        # Save model weights
+        torch.save(pipe.unet.state_dict(), checkpoint_path / "unet_lora.pt")
+        torch.save(projector.state_dict(), checkpoint_path / "controlnet_lora.pt")
+        
+        # Save training state
+        training_state = {
+            "step": step,
+            "epoch": epoch,
+            "config": config,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": lr_scheduler.state_dict(),
+            "ema": ema.state_dict()
+        }
+        torch.save(training_state, checkpoint_path / "training_state.pt")
+        
+        print("Checkpoint saved successfully")
+        
+    except Exception as e:
+        print(f"Error saving checkpoint: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
