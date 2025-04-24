@@ -8,7 +8,9 @@ import yaml
 import modal
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, random_split
+import torch.nn as nn
 from torch.nn import MSELoss, CosineEmbeddingLoss, functional as F
+from peft.tuners.lora import LoraLayer
 from transformers import get_cosine_schedule_with_warmup
 from PIL import Image
 from torchvision.utils import save_image
@@ -28,6 +30,7 @@ from lpips import LPIPS
 
 from swapper.utils.image_utils import preprocess_image
 from swapper.utils.embedding_utils import get_face_embedding
+from swapper.utils.training_modules import AdaptiveLoraLayer
 from swapper.models.projectors import EmbeddingProjector
 
 from models.lighting_mlp import LightingMLP
@@ -55,6 +58,20 @@ def encode_image(vae, image):
         latents = vae.encode(image).latent_dist.sample()
         latents = latents * vae.config.scaling_factor
     return latents
+
+def replace_lora_with_adaptive(model, cond_dim):
+    for name, module in model.named_modules():
+        if isinstance(module, LoraLayer):
+            parent, attr = _find_parent_module(model, name)
+            setattr(parent, attr, AdaptiveLoraLayer(module, cond_dim))
+
+# helper to locate parent and attribute name from a dotted path
+def _find_parent_module(root, full_name):
+    parts = full_name.split(".")
+    parent = root
+    for p in parts[:-1]:
+        parent = getattr(parent, p)
+    return parent, parts[-1]
 
 # --------------- Dataset ----------------
 # --- Dataset ---
@@ -123,7 +140,7 @@ class CharacterDataset(Dataset):
                     "image": str(face_path),
                     "normal_map": str(normal_path),
                     "lighting": frame_data.get("lighting", {}).get("coefficients"),
-                    "embedding": frame_data.get("embedding"),
+                    "embedding": embedding.tolist() if isinstance(embedding, torch.Tensor) else embedding,
                     "frame_id": frame_id,
                 }
                 if all(v is not None for v in sample.values()):
@@ -292,9 +309,132 @@ def validate_conditioning_inputs(pooled_embeds, batch_size, device):
     assert pooled_embeds.device == device, f"Device mismatch: {pooled_embeds.device} vs {device}"
     return True
 
+def calculate_losses(
+    noise_pred, noise, noise_scheduler, timesteps, noisy_latents, real_images, vae, 
+    global_step=0, warmup_steps=1000, id_loss_weight=0.5, calc_id_every=5, lora_params=None,
+    shape_predictor_path=None, face_rec_model_path=None, debug_dir: Optional[Path] = None
+):
+    # Basic diffusion loss
+    diffusion_loss = F.mse_loss(noise_pred.float(), noise.float())
+    
+    # Only do identity loss if weight is positive and it's after warmup
+    identity_weight = min(1.0, global_step / max(1, warmup_steps)) * id_loss_weight
+    identity_loss = torch.tensor(0.0, device=diffusion_loss.device)
+    
+    # Skip identity loss calculation if weight is 0 or too early in training
+    if identity_weight > 0 and global_step > warmup_steps // 2 and (global_step % calc_id_every == 0):
+        try:
+            # Move scheduler to same device as tensors
+            noise_scheduler.alphas_cumprod = noise_scheduler.alphas_cumprod.to(timesteps.device)
+            
+            # Process batch in smaller chunks if needed
+            batch_size = timesteps.shape[0]
+            
+            # We need to handle each timestep separately since they may differ in the batch
+            prev_samples = []
+            for i in range(batch_size):
+                # Process one sample at a time
+                sample_timestep = timesteps[i:i+1]  # Keep dim for broadcasting
+                sample_noise_pred = noise_pred[i:i+1]
+                sample_latents = noisy_latents[i:i+1]
+                
+                # Call step for this individual sample
+                sample_prev = noise_scheduler.step(
+                    sample_noise_pred, 
+                    sample_timestep, 
+                    sample_latents
+                ).prev_sample
+                
+                prev_samples.append(sample_prev)
+            
+            # Stack back into a batch
+            prev = torch.cat(prev_samples, dim=0)
+            
+            # *** CRITICAL FIX - Ensure correct dtype for VAE decoding ***
+            # 3) decode to RGB via the VAE - maintain the correct dtype
+            latents = prev / vae.config.scaling_factor  
+            latents = latents.to(dtype=vae.dtype)  # Match VAE's dtype (bfloat16)
+            
+            with torch.no_grad():
+                decoded = vae.decode(latents).sample            # [B, C, H, W]
+                decoded = (decoded / 2 + 0.5).clamp(0, 1)       # to [0,1]
+            
+            # 4) get the real face in [0,1]
+            real = (real_images / 2 + 0.5).clamp(0, 1)      # [B, C, H, W]
+            
+            # Add additional checks before face embedding
+            if torch.isnan(decoded).any() or torch.isinf(decoded).any():
+                print("WARNING: NaN or Inf values detected in decoded images. Skipping identity loss.")
+                raise ValueError("Invalid decoded values")
+                
+            # Check if the images have proper content before face embedding
+            if decoded.min() == decoded.max():
+                print("WARNING: Decoded images have no variation. Skipping identity loss.")
+                raise ValueError("No image variation")
+            
+            # Move to CPU for face detection processing
+            decoded_np = decoded.cpu().float().numpy()
+            real_np = real.cpu().float().numpy()
+            
+            # Convert to the expected format for face detection (uint8, 0-255)
+            decoded_np = (decoded_np * 255).astype(np.uint8).transpose(0, 2, 3, 1)
+            real_np = (real_np * 255).astype(np.uint8).transpose(0, 2, 3, 1)
+            
+            # Additional check for face detector path
+            if shape_predictor_path is None or not os.path.exists(shape_predictor_path):
+                print(f"WARNING: Face detector model not found at {shape_predictor_path}. Skipping identity loss.")
+                raise ValueError("Face detector not found")
+            else:
+                print(f"Face detector model found at {shape_predictor_path}")
+
+            # Process each image individually
+            for i in range(decoded_np.shape[0]):
+                single_decoded_np = decoded_np[i]
+                single_real_np = real_np[i]
+
+                # Call face embedding for each image
+                try:
+                    pred_emb = get_face_embedding(single_decoded_np, shape_predictor_path, face_rec_model_path, debug_dir)
+                    true_emb = get_face_embedding(single_real_np, shape_predictor_path, face_rec_model_path, debug_dir)
+                    
+                    if pred_emb is None or true_emb is None:
+                        raise ValueError("Face embeddings returned None")
+                    
+                    target = torch.ones(pred_emb.size(0), device=pred_emb.device)
+                    id_loss = F.cosine_embedding_loss(pred_emb.float(), true_emb.float(), target)
+                    identity_loss += id_loss  # Accumulate identity loss
+                except Exception as e:
+                    print(f"WARNING: Face embedding error for image {i}: {str(e)}. Skipping identity loss for this image.")
+                    continue
+
+            # Average identity loss over the batch
+            identity_loss /= decoded_np.shape[0]
+
+        except Exception as e:
+            print(f"WARNING: Error in identity loss calculation: {str(e)}")
+            print("Skipping identity loss for this batch")
+            identity_loss = torch.tensor(0.0, device=diffusion_loss.device)
+            torch.cuda.empty_cache()
+
+    if lora_params is not None:
+        reg = 1e-6 * sum(p.pow(2).sum() for p in lora_params.values())
+    else:
+        reg = 0.0
+    
+    # Total loss
+    total = diffusion_loss + identity_weight * identity_loss + reg
+    
+    return {
+        "total_loss": total,
+        "diffusion_loss": diffusion_loss,
+        "identity_loss": identity_loss,
+        "identity_weight": identity_weight,
+    }
+
 def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint: bool = False):
     """Train the model with support for checkpoints and multiple runs."""
     try:
+        global DLIB_SHAPE_PREDICTOR_PATH
         print("\n=== Starting training setup ===")
         
         # Use provided output directory or create default
@@ -349,8 +489,10 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
         if os.path.exists(landmarks_path):
             print(f"- Is symlink: {os.path.islink(landmarks_path)}")
             print(f"- Real path: {os.path.realpath(landmarks_path)}")
-            # Set environment variable for dlib with the absolute path
-            os.environ["DLIB_SHAPE_PREDICTOR"] = os.path.abspath(landmarks_path)
+            # Set the global variable
+            DLIB_SHAPE_PREDICTOR_PATH = os.path.abspath(landmarks_path)
+            # Also set the environment variable (as you're doing now)
+            os.environ["DLIB_SHAPE_PREDICTOR"] = DLIB_SHAPE_PREDICTOR_PATH
             print(f"\nSet DLIB_SHAPE_PREDICTOR to: {os.environ['DLIB_SHAPE_PREDICTOR']}")
         else:
             raise RuntimeError(f"Face landmarks model not found at {landmarks_path}")
@@ -446,17 +588,21 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                 lora_alpha=16,
                 lora_dropout=0.1,
                 target_modules=[
+                    # conditioning embedding
                     "controlnet_cond_embedding.conv_in",
                     "controlnet_cond_embedding.conv_out",
-                    # (uncomment the next lines only if you need to tune cross‑attn)
-                    # "controlnet_down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_q",
-                    # "controlnet_down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_k",
-                    # "controlnet_down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_q",
-                    # "controlnet_down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_k",
-                    # "controlnet_mid_block.attentions.*.transformer_blocks.*.attn1.to_q",
-                    # "controlnet_mid_block.attentions.*.transformer_blocks.*.attn1.to_k",
-                    # "controlnet_mid_block.attentions.*.transformer_blocks.*.attn2.to_q",
-                    # "controlnet_mid_block.attentions.*.transformer_blocks.*.attn2.to_k",
+
+                    # all Down-block attention projections
+                    "controlnet_down_blocks.*.attentions.*.to_q",
+                    "controlnet_down_blocks.*.attentions.*.to_k",
+                    "controlnet_down_blocks.*.attentions.*.to_v",
+                    "controlnet_down_blocks.*.attentions.*.to_out",
+
+                    # the Mid-block attention projections
+                    "controlnet_mid_block.attentions.*.to_q",
+                    "controlnet_mid_block.attentions.*.to_k",
+                    "controlnet_mid_block.attentions.*.to_v",
+                    "controlnet_mid_block.attentions.*.to_out",
                 ],
                 init_lora_weights="gaussian",
                 bias="none",
@@ -464,6 +610,14 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             )
         except Exception as e:
             print(f"Error creating LoRA config: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            raise
+
+        try:
+            pipe.controlnet = get_peft_model(pipe.controlnet, controlnet_lora_config)
+        except Exception as e:
+            print(f"Error getting PEFT model: {str(e)}")
             import traceback
             print(traceback.format_exc())
             raise
@@ -492,44 +646,25 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             print("\nAll target modules verified successfully!")
 
         # Now create the PEFT model
-        pipe.controlnet.eval()
+        pipe.controlnet.train()
+        # First, set all parameters to requires_grad=False
         for p in pipe.controlnet.parameters():
             p.requires_grad = False
 
-        # Then, use this corrected fix_attention_dimensions function
-        def fix_attention_dimensions(module):
-            if hasattr(module, "to_k") or hasattr(module, "to_q") or hasattr(module, "to_v"):
-                # All attention layers should operate at 1280 dimensions
-                output_dim = 1280
-                num_heads = 20
-                head_dim = output_dim // num_heads
-                
-                if "attn2" in module.__class__.__name__.lower():
-                    # Cross attention
-                    input_dim = 2048  # encoder hidden states dimension
-                else:
-                    # Self attention - always use 1280
-                    input_dim = 1280
-                
-                # Update all projection layers
-                if hasattr(module, "to_q"):
-                    module.to_q = torch.nn.Linear(input_dim, output_dim, bias=False)
-                if hasattr(module, "to_k"):
-                    module.to_k = torch.nn.Linear(input_dim, output_dim, bias=False)
-                if hasattr(module, "to_v"):
-                    module.to_v = torch.nn.Linear(input_dim, output_dim, bias=False)
-                
-                # Output projection is always to output_dim
-                if hasattr(module, "to_out"):
-                    module.to_out = torch.nn.ModuleList([
-                        torch.nn.Linear(output_dim, output_dim, bias=False),
-                        torch.nn.Dropout(p=0.0)
-                    ])
-                
-                # Update attention parameters
-                module.heads = num_heads
-                module.head_dim = head_dim
-                module.scale = head_dim ** -0.5
+        # Then, enable gradients only for LoRA parameters with properly registered hooks
+        for name, module in pipe.controlnet.named_modules():
+            if hasattr(module, 'lora_layer'):
+                # Enable gradients for the LoRA layers
+                for param_name, param in module.named_parameters():
+                    param.requires_grad = True
+                    print(f"  ✅ Enabled gradients for LoRA parameter: {name}.{param_name}")
+
+            # Explicitly handle the controlnet_cond_embedding layers that aren't being updated
+            if "controlnet_cond_embedding.conv_in" in name or "controlnet_cond_embedding.conv_out" in name:
+                for param_name, param in module.named_parameters():
+                    if "lora" in param_name:  # Only enable LoRA parameters
+                        param.requires_grad = True
+                        print(f"  🔄 Explicitly enabled gradients for: {name}.{param_name}")
 
         # Add this verification step after applying the fix
         def verify_attention_block(name, module):
@@ -695,12 +830,19 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
         projector = projector.to(accelerator.device)
         projector = accelerator.prepare(projector)
 
-        # Update optimizer to use only UNet and projector parameters
-        optimizer = torch.optim.Adam(
-            list(pipe.unet.parameters()) +
-            list(projector.parameters()),  # Remove ControlNet parameters
-            lr=float(config["training"]["learning_rate"])
-        )
+        try:
+            # Update optimizer to use only UNet and projector parameters
+            optimizer = torch.optim.Adam(
+                list(pipe.unet.parameters()) +
+                list(pipe.controlnet.parameters()) +  # Include ControlNet parameters
+                list(projector.parameters()),
+                lr=float(config["training"]["learning_rate"])
+            )
+        except Exception as e:
+            print(f"Error in optimizer setup: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            raise
 
         # Add to training setup
         num_training_steps = len(train_loader) * config["training"]["num_epochs"]
@@ -719,16 +861,29 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             subfolder="scheduler"
         )
 
-        loss_fn = MSELoss()
-        cosine_loss_fn = CosineEmbeddingLoss()
-
         # Initialize EMA
-        ema = EMAModel(
-            pipe.unet.parameters(),
-            decay=0.9999,
-            model_cls=pipe.unet.__class__
-        )
-        
+        try:
+            unet_ema = EMAModel(
+                pipe.unet.parameters(),
+                decay=0.9999,
+                model_cls=pipe.unet.__class__
+            )
+
+            controlnet_ema = EMAModel(
+                pipe.controlnet.parameters(),
+                decay=0.9999,
+                model_cls=pipe.controlnet.__class__
+            )
+
+            # Then update both EMAs in the training loop
+            unet_ema.step(pipe.unet.parameters())
+            controlnet_ema.step(pipe.controlnet.parameters())
+        except Exception as e:
+            print(f"Error in EMA setup: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            raise
+
         # Load checkpoint state if available
         if from_checkpoint and latest_checkpoint:
             checkpoint_state = load_checkpoint(
@@ -737,7 +892,7 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                 projector,
                 optimizer,
                 lr_scheduler,
-                ema
+                unet_ema
             )
             
             if checkpoint_state:
@@ -761,13 +916,18 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             optimizer, train_loader, val_loader
         )
 
+        # Set the paths for the face detection models
+        shape_predictor_path = os.path.abspath(landmarks_path)
+        face_rec_model_path = os.path.join(modal_cache, "models", "dlib_face_recognition_resnet_model_v1.dat")
+
+        # Define the debug directory path
+        debug_dir = Path(output_dir) / "debug_images"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
         # Training loop
         best_loss = float('inf')
         patience = config["training"].get("patience", 5)
         patience_counter = 0
-
-        # Near the beginning of your train function, after creating the accelerator
-        lpips_model = LPIPS(net='vgg').to(accelerator.device)
 
         for epoch in range(start_epoch, config["training"]["num_epochs"]):
             total_loss = 0
@@ -816,34 +976,44 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
 
                         # Inside the training loop, add this before the ControlNet forward pass
                         try:
-                            with torch.autograd.detect_anomaly():
-                                # Track inputs for gradient flow
-                                try:
-                                    debug_print("\n=== Input Gradient Tracking ===")
-                                    debug_print(f"noisy_latents requires_grad: {noisy_latents.requires_grad}")
-                                    debug_print(f"timesteps requires_grad: {timesteps.requires_grad}")
-                                    debug_print(f"encoder_hidden_states requires_grad: {controlnet_embeds.requires_grad}")
-                                    debug_print(f"normal_map requires_grad: {normal_map.requires_grad}")
-                                except Exception as e:
-                                    debug_print(f"Error tracking input gradients: {str(e)}")
-                                              
-                                # Prepare the added_cond_kwargs with proper dimensions
-                                added_cond_kwargs = {
-                                    "text_embeds": torch.zeros(controlnet_embeds.size(0), 1280, device=controlnet_embeds.device),
-                                    "time_ids": torch.zeros(controlnet_embeds.size(0), 6, device=controlnet_embeds.device)
-                                }
+                            # Use register_hook to ensure gradients flow correctly
+                            def hook_fn(grad):
+                                return grad * 1.0  # Identity function, but forces gradient to be computed
 
-                                # Always run ControlNet in inference mode
-                                with torch.no_grad():
-                                    down_block_res_samples, mid_block_res_sample = pipe.controlnet(
-                                        noisy_latents,
-                                        timesteps,
-                                        encoder_hidden_states=controlnet_embeds,
-                                        controlnet_cond=normal_map,
-                                        added_cond_kwargs=added_cond_kwargs,  # Add this parameter
-                                        return_dict=False,
-                                    )
+                            # Explicitly register hooks for LoRA parameters
+                            lora_params = {}
+                            for name, param in pipe.controlnet.named_parameters():
+                                if "controlnet_cond_embedding" in name and "lora" in name and param.requires_grad:
+                                    param.register_hook(hook_fn)
+                                    lora_params[name] = param
 
+                            # Create consistent validation conditioning
+                            batch_size = noisy_latents.shape[0]
+                            device = noisy_latents.device
+
+                            # Use same format as training
+                            add_time_ids = torch.zeros((batch_size, 6), device=device)
+                            add_time_ids[:, 0] = config["resolution"]
+                            add_time_ids[:, 1] = config["resolution"]
+                            add_time_ids[:, 2:6] = torch.tensor([0, 0, config["resolution"], config["resolution"]], device=device)
+
+                            text_embeds = torch.zeros((batch_size, pipe.text_encoder_2.config.projection_dim),
+                                    dtype=torch.bfloat16, device=device)
+
+                            added_cond_kwargs = {
+                                "text_embeds": text_embeds,
+                                "time_ids": add_time_ids
+                            }
+
+                            # Down blocks and mid blocks residual connections
+                            down_block_res_samples, mid_block_res_sample = pipe.controlnet(
+                                noisy_latents,
+                                timesteps,
+                                encoder_hidden_states=controlnet_embeds,
+                                controlnet_cond=normal_map,
+                                added_cond_kwargs=added_cond_kwargs,
+                                return_dict=False,
+                            )
                         except Exception as e:
                             debug_print(f"Error in ControlNet forward tracking: {str(e)}")
                             import traceback
@@ -879,97 +1049,60 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                         except Exception as e:
                             debug_print(f"Error in post-backward gradient check: {str(e)}")
 
-                        # Use same conditioning in UNet
                         try:
-                            # Create the same added_cond_kwargs that was used for ControlNet
-                            added_cond_kwargs = {
-                                "text_embeds": torch.zeros(combined_cross.size(0), 1280, device=combined_cross.device),
-                                "time_ids": torch.zeros(combined_cross.size(0), 6, device=combined_cross.device)
-                            }
-
+                            # UNet forward pass
                             noise_pred = pipe.unet(
                                 noisy_latents,
                                 timesteps,
-                                encoder_hidden_states=combined_cross,  # Use 2048-dim for UNet
+                                encoder_hidden_states=combined_cross,
                                 down_block_additional_residuals=down_block_res_samples,
                                 mid_block_additional_residual=mid_block_res_sample,
-                                added_cond_kwargs=added_cond_kwargs,  # Add this parameter
+                                added_cond_kwargs=added_cond_kwargs,
                             ).sample
-
-                            # Modify loss computation to ensure gradients are maintained
-                            diffusion_loss = F.mse_loss(noise_pred.float(), noise.float())
-                            a = combined_cross
-                            b = controlnet_embeds
-
-                            if a.ndim == 3:
-                                a = a.squeeze(1)
-                            if b.ndim == 3:
-                                b = b.squeeze(1)
-
-                            assert a.shape == b.shape, f"Mismatched projector shapes: {a.shape} vs {b.shape}"
-
-                            cosine_loss = cosine_loss_fn(
-                                a.float(),
-                                b.float(),
-                                torch.ones(a.size(0), device=a.device)
-                            )
-                            controlnet_loss = sum(res.abs().mean() for res in down_block_res_samples)
-                            controlnet_loss += mid_block_res_sample.abs().mean()
-
-                            # Use LPIPS for perceptual similarity
-                            lpips_loss = F.mse_loss(noise_pred, noise)  # Just use MSE in latent space
-                            
-                            # Extract lighting features from generated and target images
-                            # You can use a simple MLP for this
-                            #lighting_pred = lighting_extractor(decoded)
-                            #lighting_target = batch["lighting"]
-                            
-                            #lighting_loss = F.mse_loss(lighting_pred, lighting_target)
-                            
-                            # Using a pre-trained facial landmark detector
-                            #landmark_loss = landmark_detector.get_landmark_loss(decoded, image)
-                            
-                            # Use a pre-trained normal map estimator to predict normals from generated image
-                            #predicted_normal = normal_estimator(decoded)
-                            #normal_loss = F.mse_loss(predicted_normal, normal_map)
-                            
-                            total_loss = (
-                                1.0 * diffusion_loss +       # Standard diffusion objective
-                                0.5 * cosine_loss +          # Identity preservation
-                                0.3 * lpips_loss            # Perceptual similarity
-                                #0.3 * lighting_loss +        # Lighting consistency
-                                #0.2 * landmark_loss +        # Facial structure preservation
-                                #0.3 * normal_loss            # Normal map consistency
-                            )
-
-                            # After loss calculation, add this
-                            try:
-                                debug_print("\n=== Loss Gradient Flow ===")
-                                debug_print(f"diffusion_loss: {diffusion_loss.item():.6f}, requires_grad: {diffusion_loss.requires_grad}")
-                                debug_print(f"cosine_loss: {cosine_loss.item():.6f}, requires_grad: {cosine_loss.requires_grad}")
-                                debug_print(f"controlnet_loss: {controlnet_loss.item():.6f}, requires_grad: {controlnet_loss.requires_grad}")
-                                debug_print(f"total_loss: {total_loss.item():.6f}, requires_grad: {total_loss.requires_grad}")
-                                debug_print(f"total_loss.grad_fn: {total_loss.grad_fn}")
-                            except Exception as e:
-                                debug_print(f"Error in loss gradient flow tracking: {str(e)}")
-
-                            accelerator.backward(total_loss)
-
-                            # pick one of your lora tensors
-                            for n,p in pipe.controlnet.controlnet_cond_embedding.named_parameters():
-                                if "lora_A" in n:
-                                    print(n, "grad norm =", p.grad.norm().item())
-                                    break
-                            lr_scheduler.step()
-                            optimizer.step()
                         except Exception as e:
-                            print(f"Error in UNet forward pass: {str(e)}")
+                            debug_print(f"Error in UNet forward pass: {str(e)}")
                             import traceback
-                            print(traceback.format_exc())
-                            raise
+                            debug_print(traceback.format_exc())
+
+                        try:
+                            # Calculate simplified losses
+                            losses = calculate_losses(
+                                noise_pred,
+                                noise,
+                                noise_scheduler,     # your DDPMScheduler
+                                timesteps,           # the sampled timesteps
+                                noisy_latents,       # the latents you passed into UNet
+                                image,               # batch["pixel_values"]
+                                pipe.vae,            # the VAE from your pipeline
+                                global_step,
+                                warmup_steps=num_warmup_steps,
+                                id_loss_weight=0.5,
+                                calc_id_every=5,
+                                lora_params=lora_params,
+                                shape_predictor_path=shape_predictor_path,
+                                face_rec_model_path=face_rec_model_path,
+                                debug_dir=debug_dir  # Pass the debug directory
+                            )
+                        except Exception as e:
+                            debug_print(f"Error in loss calculation: {str(e)}")
+                            import traceback
+                            debug_print(traceback.format_exc())
+
+                        # Extract total loss for backward
+                        total_loss = losses["total_loss"]
+                        accelerator.backward(total_loss)
+
+                        # pick one of your lora tensors
+                        for n,p in pipe.controlnet.controlnet_cond_embedding.named_parameters():
+                            if "lora_A" in n:
+                                debug_print(n, "grad norm =", p.grad.norm().item())
+                                break
+                        lr_scheduler.step()
+                        optimizer.step()
 
                         # Update EMA
-                        ema.step(pipe.unet.parameters())
+                        unet_ema.step(pipe.unet.parameters())
+                        controlnet_ema.step(pipe.controlnet.parameters())
 
                         if global_step % config["training"].get("log_steps", 10) == 0:
                             # Get current learning rate
@@ -989,154 +1122,199 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                                 f"Step: {global_step}/{config['training']['max_train_steps']} | "
                                 f"Learning Rate: {current_lr:.6f}\n"
                                 f"Losses:\n"
-                                f"- Total: {total_loss.item():.4f}\n"
-                                f"- Diffusion: {diffusion_loss.item():.4f}\n"
-                                f"- Identity: {cosine_loss.item():.4f}\n"
-                                f"Gradient Norms:\n"
-                                f"- UNet: {grad_norm_unet:.4f}\n"
-                                f"Memory:\n"
-                                f"- Allocated: {torch.cuda.memory_allocated()/1024**2:.1f}MB\n"
-                                f"- Reserved: {torch.cuda.memory_reserved()/1024**2:.1f}MB\n"
-                                f"Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            )  
+                                f"- Total: {losses['total_loss'].item():.4f}\n"
+                                f"- Diffusion: {losses['diffusion_loss'].item():.4f}\n"
+                                f"- Identity (w={losses['identity_weight']:.2f}): {losses['identity_loss'].item():.4f}\n"
+                            )
                     
-                        # Save checkpoints
-                        if global_step % config["training"].get("save_steps", 500) == 0:    
-                            if accelerator.is_main_process:
-                                checkpoint_dir = output_dir / "checkpoints"
-                                
-                                save_path = checkpoint_dir / f"checkpoint-{epoch}-{global_step}"
-                                save_path.mkdir(parents=True, exist_ok=True)
-                                print(f"\nSaving checkpoint to: {save_path}")
-                                
-                                # Save LoRA weights separately
-                                unwrapped_unet = accelerator.unwrap_model(pipe.unet)
-                                unwrapped_controlnet = accelerator.unwrap_model(pipe.controlnet)
-                                
-                                # Save only the LoRA state dict instead of using save_pretrained
-                                unet_lora_state_dict = unwrapped_unet.state_dict()
-                                controlnet_lora_state_dict = unwrapped_controlnet.state_dict()
-                                
-                                # Save files and verify
-                                checkpoint_files = {
-                                    "unet_lora.pt": unet_lora_state_dict,
-                                    "projector.pt": projector.state_dict(),
-                                    "training_state.pt": {
-                                        "step": step,
-                                        "epoch": epoch,
-                                        "optimizer": optimizer.state_dict(),
-                                                "scheduler": lr_scheduler.state_dict(),
-                                        "ema": ema.state_dict(),
-                                        "config": config,
+                        try:
+                            # Save checkpoints
+                            if global_step % config["training"].get("save_steps", 500) == 0:    
+                                if accelerator.is_main_process:
+                                    checkpoint_dir = output_dir / "checkpoints"
+                                    
+                                    save_path = checkpoint_dir / f"checkpoint-{epoch}-{global_step}"
+                                    save_path.mkdir(parents=True, exist_ok=True)
+                                    print(f"\nSaving checkpoint to: {save_path}")
+                                    
+                                    # Save LoRA weights separately
+                                    unwrapped_unet = accelerator.unwrap_model(pipe.unet)
+                                    unwrapped_controlnet = accelerator.unwrap_model(pipe.controlnet)
+                                    
+                                    # Save only the LoRA state dict instead of using save_pretrained
+                                    unet_lora_state_dict = unwrapped_unet.state_dict()
+                                    controlnet_lora_state_dict = unwrapped_controlnet.state_dict()
+                                    
+                                    # Save files and verify
+                                    checkpoint_files = {
+                                        "unet_lora.pt": unet_lora_state_dict,
+                                        "projector.pt": projector.state_dict(),
+                                        "training_state.pt": {
+                                            "step": step,
+                                            "epoch": epoch,
+                                            "optimizer": optimizer.state_dict(),
+                                                    "scheduler": lr_scheduler.state_dict(),
+                                            "ema": unet_ema.state_dict(),
+                                            "config": config,
+                                        }
                                     }
-                                }
-                                
-                                for filename, data in checkpoint_files.items():
-                                    file_path = save_path / filename
-                                    torch.save(data, file_path)
-                                    print(f"Saved {filename}: {file_path.exists()}")
+                                    
+                                    for filename, data in checkpoint_files.items():
+                                        file_path = save_path / filename
+                                        torch.save(data, file_path)
+                                        print(f"Saved {filename}: {file_path.exists()}")
 
-                                CHARACTER_DATA_VOLUME.commit()
-                                print("✅ Committed volume changes")
+                                    CHARACTER_DATA_VOLUME.commit()
+                                    print("✅ Committed volume changes")
+                        except Exception as e:
+                            print(f"Error in checkpoint saving: {str(e)}")
+                            import traceback
+                            print(traceback.format_exc())
+                            raise
 
                         # Add the preview generation code:
                         if global_step % config["training"].get("preview_steps", 100) == 0:
                             accelerator.print("\nGenerating preview image...")
                             
                             try:
-                                # 1) Put everything in eval
-                                ema.store(pipe.unet.parameters())
-                                ema.copy_to(pipe.unet.parameters())
+                                # Add explicit memory cleanup before preview generation
+                                torch.cuda.empty_cache()
+                                
+                                # 1) Put everything in eval mode
+                                unet_ema.store(pipe.unet.parameters())
+                                unet_ema.copy_to(pipe.unet.parameters())
+                                controlnet_ema.store(pipe.controlnet.parameters())
+                                controlnet_ema.copy_to(pipe.controlnet.parameters())
                                 pipe.unet.eval()
                                 pipe.controlnet.eval()
                                 pipe.vae.eval()
 
                                 device = accelerator.device
-
+                                
+                                # Use lower resolution for preview to avoid OOM
+                                preview_resolution = min(config["resolution"], 512)
+                                
                                 # 2) Prepare normal map in [0,1], float32
                                 sample_normal = batch["normal_map"][0:1].to(device)
                                 sample_normal = ((sample_normal + 1.0) / 2.0).clamp(0, 1).to(torch.float32)
+                                
+                                # Resize if necessary to save memory
+                                if sample_normal.shape[-1] > preview_resolution:
+                                    sample_normal = F.interpolate(sample_normal, size=(preview_resolution, preview_resolution), mode='bilinear')
 
                                 # 3) Build your embeddings
                                 raw_id = F.normalize(batch["embedding"][0:1].to(device), dim=-1)
                                 raw_light = F.normalize(batch["lighting"][0:1].to(device), dim=-1)
 
+                                # Get all embeddings at once
                                 unet_emb = projector(raw_id, raw_light, target="unet")
-                                ctrl_emb = projector(raw_id, raw_light, target="controlnet")
-
-                                # 4) Prepare latents & timesteps
-                                noisy_latents, noise, timesteps = prepare_latents(
-                                    pipe.vae,
-                                    batch["pixel_values"][0:1].to(device, dtype=pipe.vae.dtype),
-                                    noise_scheduler
-                                )
-                                noisy_latents = noisy_latents.requires_grad_(False)
-
-                                # In the preview generation code
+                                controlnet_emb = projector(raw_id, raw_light, target="controlnet")
+                                
+                                # 4) MANUAL PIPELINE IMPLEMENTATION
+                                # Setup basic parameters
+                                batch_size = 1
+                                num_inference_steps = 15  # Reduced from 25 to save memory
+                                guidance_scale = 1.0
+                                
+                                # Create the same conditioning as in training
+                                add_time_ids = torch.zeros((batch_size, 6), device=device)
+                                add_time_ids[:, 0] = preview_resolution
+                                add_time_ids[:, 1] = preview_resolution
+                                add_time_ids[:, 2:6] = torch.tensor([0, 0, preview_resolution, preview_resolution], device=device)
+                                
+                                text_embeds = torch.zeros((batch_size, pipe.text_encoder_2.config.projection_dim),
+                                    dtype=torch.bfloat16, device=device)
+                                
                                 added_cond_kwargs = {
-                                    "text_embeds": torch.zeros(ctrl_emb.size(0), 1280, device=ctrl_emb.device),
-                                    "time_ids": torch.zeros(ctrl_emb.size(0), 6, device=ctrl_emb.device)
+                                    "text_embeds": text_embeds,
+                                    "time_ids": add_time_ids
                                 }
-
+                                
+                                # Set up scheduler manually
+                                pipe.scheduler.set_timesteps(num_inference_steps, device=device)
+                                
+                                # Get latents with proper device generator
+                                generator = torch.Generator(device=device).manual_seed(42)
+                                latents = torch.randn((1, 4, preview_resolution // 8, preview_resolution // 8), 
+                                                      device=device, generator=generator)
+                                latents = latents * pipe.scheduler.init_noise_sigma
+                                
+                                # Prepare normal map
+                                normal_map = sample_normal.to(device)
+                                
+                                # Use torch.no_grad to save memory
                                 with torch.no_grad():
-                                    # 6) ControlNet forward
-                                    down_samples, mid_sample = pipe.controlnet(
-                                        noisy_latents,
-                                        timesteps,
-                                        encoder_hidden_states=ctrl_emb,
-                                        controlnet_cond=sample_normal,
-                                        added_cond_kwargs=added_cond_kwargs,
-                                        return_dict=False,
-                                    )
+                                    # Manual denoising loop
+                                    for i, t in enumerate(pipe.scheduler.timesteps):
+                                        # Scale input according to the scheduler
+                                        latent_model_input = pipe.scheduler.scale_model_input(latents, timestep=t)
+                                        
+                                        # Get ControlNet conditioning
+                                        down_block_res_samples, mid_block_res_sample = pipe.controlnet(
+                                            latent_model_input,
+                                            t,
+                                            encoder_hidden_states=controlnet_emb,
+                                            controlnet_cond=normal_map,
+                                            added_cond_kwargs=added_cond_kwargs,
+                                            return_dict=False,
+                                        )
+                                        
+                                        # Predict noise with UNet
+                                        noise_pred = pipe.unet(
+                                            latent_model_input,
+                                            t,
+                                            encoder_hidden_states=unet_emb,
+                                            down_block_additional_residuals=down_block_res_samples,
+                                            mid_block_additional_residual=mid_block_res_sample,
+                                            added_cond_kwargs=added_cond_kwargs,
+                                        ).sample
+                                        
+                                        # Compute previous noisy sample
+                                        latents = pipe.scheduler.step(noise_pred, t, latents).prev_sample
+                                
+                                # Decode latents
+                                with torch.no_grad():
+                                    latents = 1 / 0.18215 * latents
+                                    image = pipe.vae.decode(latents).sample
+                                
+                                # Convert to PIL
+                                image = (image / 2 + 0.5).clamp(0, 1)
+                                image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+                                image = (image * 255).round().astype("uint8")
+                                generated_image = Image.fromarray(image[0])
+                                
+                                # Rest of visualization and saving code
+                                # Fix the dimension mismatch in the tensors
+                                original_image = batch["pixel_values"][0:1].to(device)
+                                original_image = (original_image / 2 + 0.5).clamp(0, 1)
+                                original_image = original_image[0]  # Remove batch dimension to get [C,H,W]
 
-                                    # 7) UNet forward
-                                    noise_pred = pipe.unet(
-                                        noisy_latents,
-                                        timesteps,
-                                        encoder_hidden_states=unet_emb,
-                                        down_block_additional_residuals=down_samples,
-                                        mid_block_additional_residual=mid_sample,
-                                        added_cond_kwargs=added_cond_kwargs,  # Add this parameter
-                                    ).sample
+                                # Convert PIL image to tensor and ensure correct shape [C,H,W]
+                                generated_tensor = torch.from_numpy(np.array(generated_image)).permute(2, 0, 1) / 255.0
+                                generated_tensor = generated_tensor.to('cpu')  # Move to CPU to save GPU memory
 
-                                    # 8) One-step denoise + decode
-                                    # Move timesteps to CPU to match the scheduler's internal tensors
-                                    cpu_timesteps = timesteps.cpu()
-                                    
-                                    # Run scheduler with CPU tensors
-                                    latents = noise_scheduler.step(
-                                        noise_pred.detach().cpu(), 
-                                        cpu_timesteps, 
-                                        noisy_latents.detach().cpu()
-                                    ).prev_sample
-                                    
-                                    # Move results back to GPU for the rest of processing
-                                    latents = latents.to(device)
-                                    
-                                    # Decode to pixel space
-                                    decoded_images = pipe.vae.decode(latents / 0.18215).sample
-                                    # Scale to [0,1] range
-                                    decoded_images = (decoded_images / 2 + 0.5).clamp(0, 1)
+                                # Make sure sample_normal has the right shape [C,H,W] (no batch dimension)
+                                sample_normal = sample_normal[0] if sample_normal.dim() == 4 else sample_normal
+                                sample_normal = sample_normal.to('cpu')  # Move to CPU to save GPU memory
 
-                                # Create a side-by-side comparison
+                                # Now all tensors should be [C,H,W]
                                 comparison = torch.cat([
-                                    sample_normal,  # Original normal map
-                                    decoded_images,  # Generated image
-                                ], dim=3)  # Concatenate horizontally
+                                    sample_normal,      # Normal map [C,H,W]
+                                    original_image.cpu(),  # Original face [C,H,W]
+                                    generated_tensor,   # Generated face [C,H,W]
+                                ], dim=2)  # Concatenate horizontally
 
                                 # Save the comparison
                                 preview_path = output_dir / "previews" / f"preview_e{epoch}_s{global_step}.png"
                                 preview_path.parent.mkdir(exist_ok=True, parents=True)
                                 save_image(comparison, str(preview_path))
                                 accelerator.print(f"✅ Preview saved to {preview_path}")
-                                
+
                             except Exception as e:
-                                debug_print("\n=== Preview Generation Failed ===")
-                                debug_print(f"Error type: {type(e).__name__}")
-                                debug_print(f"Error message: {str(e)}")
+                                print(f"Preview generation failed: {str(e)}")
                                 import traceback
-                                debug_print(f"\nTraceback:\n{traceback.format_exc()}")
-                                raise
+                                print(traceback.format_exc())
+                                # Continue with training
 
                         # Log before zeroing gradients
                         optimizer.zero_grad()
@@ -1147,157 +1325,170 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                     break
                 
             # Validation pass
-            pipe.unet.eval()
-            total_val_loss = 0
-            val_diffusion_losses = []
-            val_identity_losses = []
+            try:
+                pipe.unet.eval()
+                pipe.controlnet.eval()
+                pipe.vae.eval()
+                total_val_loss = 0
+                val_diffusion_losses = []
+                val_identity_losses = []
 
-            with torch.no_grad():
-                for batch in val_loader:
-                    image = batch["pixel_values"].to(accelerator.device, dtype=torch.bfloat16)
-                    normal_map = batch["normal_map"].to(accelerator.device, dtype=torch.bfloat16)
-                    identity = F.normalize(batch["embedding"].to(accelerator.device), dim=-1)
-                    lighting = F.normalize(batch["lighting"].to(accelerator.device), dim=-1)
+                with torch.no_grad():
+                    for batch in val_loader:
+                        image = batch["pixel_values"].to(accelerator.device, dtype=torch.bfloat16)
+                        normal_map = batch["normal_map"].to(accelerator.device, dtype=torch.bfloat16)
+                        identity = F.normalize(batch["embedding"].to(accelerator.device), dim=-1)
+                        lighting = F.normalize(batch["lighting"].to(accelerator.device), dim=-1)
 
-                    # Use the existing projector
-                    combined_cross = projector(identity, lighting, target="unet")  # For UNet
-                    controlnet_embeds = projector(identity, lighting, target="controlnet")  # For ControlNet
+                        # Use the existing projector
+                        combined_cross = projector(identity, lighting, target="unet")  # For UNet
+                        controlnet_embeds = projector(identity, lighting, target="controlnet")  # For ControlNet
 
-                    noisy_latents, noise, timesteps = prepare_latents(pipe.vae, image, noise_scheduler)
-                    
-                    debug_print("\nInput tensor details:")
-                    debug_print(f"noisy_latents - shape: {noisy_latents.shape}, dtype: {noisy_latents.dtype}, device: {noisy_latents.device}")
-                    debug_print(f"timesteps - shape: {timesteps.shape}, dtype: {timesteps.dtype}, device: {timesteps.device}")
-                    debug_print(f"encoder_hidden_states - shape: {combined_cross.shape}, dtype: {combined_cross.dtype}, device: {combined_cross.device}")
-                    debug_print(f"controlnet_cond - shape: {normal_map.shape}, dtype: {normal_map.dtype}, device: {normal_map.device}")
+                        noisy_latents, noise, timesteps = prepare_latents(pipe.vae, image, noise_scheduler)
+                        
+                        debug_print("\nInput tensor details:")
+                        debug_print(f"noisy_latents - shape: {noisy_latents.shape}, dtype: {noisy_latents.dtype}, device: {noisy_latents.device}")
+                        debug_print(f"timesteps - shape: {timesteps.shape}, dtype: {timesteps.dtype}, device: {timesteps.device}")
+                        debug_print(f"encoder_hidden_states - shape: {combined_cross.shape}, dtype: {combined_cross.dtype}, device: {combined_cross.device}")
+                        debug_print(f"controlnet_cond - shape: {normal_map.shape}, dtype: {normal_map.dtype}, device: {normal_map.device}")
 
-                    # In the validation loop
-                    added_cond_kwargs = {
-                        "text_embeds": torch.zeros(controlnet_embeds.size(0), 1280, device=controlnet_embeds.device),
-                        "time_ids": torch.zeros(controlnet_embeds.size(0), 6, device=controlnet_embeds.device)
-                    }
+                        # Create consistent validation conditioning
+                        batch_size = noisy_latents.shape[0]
+                        device = noisy_latents.device
 
-                    # ControlNet forward pass
-                    down_block_res_samples, mid_block_res_sample = pipe.controlnet(
-                        noisy_latents,
-                        timesteps,
-                        encoder_hidden_states=controlnet_embeds,
-                        controlnet_cond=normal_map,
-                        added_cond_kwargs=added_cond_kwargs,
-                        return_dict=False,
-                    )
+                        # Use same format as training
+                        add_time_ids = torch.zeros((batch_size, 6), device=device)
+                        add_time_ids[:, 0] = config["resolution"]
+                        add_time_ids[:, 1] = config["resolution"]
+                        add_time_ids[:, 2:6] = torch.tensor([0, 0, config["resolution"], config["resolution"]], device=device)
 
-                    debug_print("\n=== Debug: ControlNet Output ===")
-                    debug_print(f"Number of down block samples: {len(down_block_res_samples)}")
-                    for i, sample in enumerate(down_block_res_samples):
-                        debug_print(f"- Down block {i} shape: {sample.shape}")
-                    debug_print(f"Mid block sample shape: {mid_block_res_sample.shape}")
+                        text_embeds = torch.zeros((batch_size, pipe.text_encoder_2.config.projection_dim),
+                                dtype=torch.bfloat16, device=device)
 
-                    try:
-                        # Create the same added_cond_kwargs that was used for ControlNet
                         added_cond_kwargs = {
-                            "text_embeds": torch.zeros(combined_cross.size(0), 1280, device=combined_cross.device),
-                            "time_ids": torch.zeros(combined_cross.size(0), 6, device=combined_cross.device)
+                            "text_embeds": text_embeds,
+                            "time_ids": add_time_ids
                         }
 
-                        noise_pred = pipe.unet(
+                        # ControlNet forward pass
+                        down_block_res_samples, mid_block_res_sample = pipe.controlnet(
                             noisy_latents,
                             timesteps,
-                            encoder_hidden_states=combined_cross,  # Use 2048-dim for UNet
-                            down_block_additional_residuals=down_block_res_samples,
-                            mid_block_additional_residual=mid_block_res_sample,
-                            added_cond_kwargs=added_cond_kwargs,  # Add this parameter
-                        ).sample
-                    except Exception as e:
-                        print(f"Error in unet: {str(e)}")
-                        import traceback
-                        print(traceback.format_exc())
-                        raise
-
-                    try:
-                        diffusion_loss = F.mse_loss(noise_pred.float(), noise.float())
-                        a = combined_cross
-                        b = controlnet_embeds
-
-                        if a.ndim == 3:
-                            a = a.squeeze(1)
-                        if b.ndim == 3:
-                            b = b.squeeze(1)
-
-                        assert a.shape == b.shape, f"Mismatched projector shapes: {a.shape} vs {b.shape}"
-
-                        cosine_loss = cosine_loss_fn(
-                            a.float(),
-                            b.float(),
-                            torch.ones(a.size(0), device=a.device)
+                            encoder_hidden_states=controlnet_embeds,
+                            controlnet_cond=normal_map,
+                            added_cond_kwargs=added_cond_kwargs,
+                            return_dict=False,
                         )
-                        val_loss = diffusion_loss + config["training"].get("lambda_identity", 0.5) * cosine_loss
-                    except Exception as e:
-                        print(f"Error in loss calculation: {str(e)}")
-                        import traceback
-                        print(traceback.format_exc())
-                        raise
-                    
-                    val_diffusion_losses.append(diffusion_loss.item())
-                    val_identity_losses.append(cosine_loss.item())
-                    total_val_loss += val_loss.item()
 
-            avg_val_loss = total_val_loss / len(val_loader)
-            avg_diffusion_loss = sum(val_diffusion_losses) / len(val_diffusion_losses)
-            avg_identity_loss = sum(val_identity_losses) / len(val_identity_losses)
+                        debug_print("\n=== Debug: ControlNet Output ===")
+                        debug_print(f"Number of down block samples: {len(down_block_res_samples)}")
+                        for i, sample in enumerate(down_block_res_samples):
+                            debug_print(f"- Down block {i} shape: {sample.shape}")
+                        debug_print(f"Mid block sample shape: {mid_block_res_sample.shape}")
 
-            # Print validation results
-            accelerator.print(
-                f"\n=== Validation Results ===\n"
-                f"Epoch: {epoch}/{config['training']['num_epochs']}\n"
-                f"Current Validation Loss: {avg_val_loss:.6f}\n"
-                f"Best Validation Loss: {best_loss:.6f}\n"
-                f"Improvement: {(best_loss - avg_val_loss):.6f} ({'✓' if avg_val_loss < best_loss else '✗'})\n"
-                f"Detailed Losses:\n"
-                f"- Diffusion: {avg_diffusion_loss:.6f}\n"
-                f"- Identity: {avg_identity_loss:.6f}\n"
-                f"Patience Counter: {patience_counter}/{patience}\n"
-                f"Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            )
+                        try:
+                            noise_pred = pipe.unet(
+                                noisy_latents,
+                                timesteps,
+                                encoder_hidden_states=combined_cross,  # Use 2048-dim for UNet
+                                down_block_additional_residuals=down_block_res_samples,
+                                mid_block_additional_residual=mid_block_res_sample,
+                                added_cond_kwargs=added_cond_kwargs,  # Add this parameter
+                            ).sample
+                        except Exception as e:
+                            print(f"Error in unet: {str(e)}")
+                            import traceback
+                            print(traceback.format_exc())
+                            raise
 
-            pipe.unet.train()
+                        try:
+                            val_losses = calculate_losses(
+                                noise_pred,
+                                noise,
+                                noise_scheduler,     # your DDPMScheduler
+                                timesteps,           # the sampled timesteps
+                                noisy_latents,       # the latents you passed into UNet
+                                image,               # batch["pixel_values"]
+                                pipe.vae,            # the VAE from your pipeline
+                                global_step,
+                                warmup_steps=num_warmup_steps,
+                                id_loss_weight=0.5,
+                                calc_id_every=5
+                            )
+                        except Exception as e:
+                            print(f"Error in loss calculation: {str(e)}")
+                            import traceback
+                            print(traceback.format_exc())
+                            raise
+                        
+                        val_diffusion_losses.append(val_losses["diffusion_loss"].item())
+                        val_identity_losses.append(val_losses["identity_loss"].item())
+                        total_val_loss += val_losses["total_loss"].item()
 
-            # Early stopping
-            if avg_val_loss < best_loss:
-                best_loss = avg_val_loss
-                patience_counter = 0
-                # Save best model
-                if accelerator.is_main_process:
-                    ema.store(pipe.unet.parameters())
-                    best_model_path = output_dir / "best_model"
-                    best_model_path.mkdir(parents=True, exist_ok=True)
-                    
-                    # Unwrap models
-                    unwrapped_unet = accelerator.unwrap_model(pipe.unet)
-                    unwrapped_controlnet = accelerator.unwrap_model(pipe.controlnet)
-                    
-                    # Save LoRA state dicts directly
-                    torch.save(unwrapped_unet.state_dict(), best_model_path / "unet_lora.pt")
-                    torch.save(projector.state_dict(), best_model_path / "projector.pt")
-                    
-                    # Save training state
-                    training_state = {
-                        "best_loss": best_loss,
-                        "config": config,
-                        "ema": ema.state_dict(),
-                        "base_model_path": "stabilityai/stable-diffusion-xl-base-1.0"  # Add this for reference
-                    }
-                    torch.save(training_state, best_model_path / "training_state.pt")
+                avg_val_loss = total_val_loss / len(val_loader)
+                avg_diffusion_loss = sum(val_diffusion_losses) / len(val_diffusion_losses)
+                avg_identity_loss = sum(val_identity_losses) / len(val_identity_losses)
 
-                    CHARACTER_DATA_VOLUME.commit()
-                    print("✅ Committed volume changes")
-                    
-                    ema.restore(pipe.unet.parameters())
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print("Early stopping triggered")
-                    break
+                # Print validation results
+                accelerator.print(
+                    f"\n=== Validation Results ===\n"
+                    f"Epoch: {epoch}/{config['training']['num_epochs']}\n"
+                    f"Current Validation Loss: {avg_val_loss:.6f}\n"
+                    f"Best Validation Loss: {best_loss:.6f}\n"
+                    f"Improvement: {(best_loss - avg_val_loss):.6f} ({'✓' if avg_val_loss < best_loss else '✗'})\n"
+                    f"Detailed Losses:\n"
+                    f"- Diffusion: {avg_diffusion_loss:.6f}\n"
+                    f"- Identity: {avg_identity_loss:.6f}\n"
+                    f"Patience Counter: {patience_counter}/{patience}\n"
+                    f"Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                )
+
+                pipe.unet.train()
+
+                # Early stopping
+                if avg_val_loss < best_loss:
+                    best_loss = avg_val_loss
+                    patience_counter = 0
+                    # Save best model
+                    if accelerator.is_main_process:
+                        unet_ema.store(pipe.unet.parameters())
+                        controlnet_ema.store(pipe.controlnet.parameters())
+                        best_model_path = output_dir / "best_model"
+                        best_model_path.mkdir(parents=True, exist_ok=True)
+                        
+                        # Unwrap models
+                        unwrapped_unet = accelerator.unwrap_model(pipe.unet)
+                        unwrapped_controlnet = accelerator.unwrap_model(pipe.controlnet)
+                        
+                        # Save LoRA state dicts directly
+                        torch.save(unwrapped_unet.state_dict(), best_model_path / "unet_lora.pt")
+                        torch.save(projector.state_dict(), best_model_path / "projector.pt")
+                        
+                        # Save training state
+                        training_state = {
+                            "best_loss": best_loss,
+                            "config": config,
+                            "ema": unet_ema.state_dict(),
+                            "base_model_path": "stabilityai/stable-diffusion-xl-base-1.0"  # Add this for reference
+                        }
+                        torch.save(training_state, best_model_path / "training_state.pt")
+
+                        CHARACTER_DATA_VOLUME.commit()
+                        print("✅ Committed volume changes")
+                        
+                        unet_ema.restore(pipe.unet.parameters())
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print("Early stopping triggered")
+                        break
+
+            except Exception as e:
+                print(f"Error in validation loop: {str(e)}")
+                import traceback
+                print(f"Traceback: {traceback.format_exc()}")
+                # Continue with training instead of crashing
+                pipe.unet.train()
 
         if accelerator.is_main_process:
             final_path = output_dir / "final_model"
@@ -1314,45 +1505,12 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             # Save final training state
             training_state = {
                 "config": config,
-                "ema": ema.state_dict(),
+                "ema": unet_ema.state_dict(),
                 "base_model_path": "stabilityai/stable-diffusion-xl-base-1.0"
             }
             torch.save(training_state, final_path / "training_state.pt")
             CHARACTER_DATA_VOLUME.commit()
             print("✅ Committed volume changes")
-
-        # After optimizer step
-        if global_step % 10 == 0:  # Check every 10 steps
-            debug_print("\n=== Debug: Parameter Updates ===")
-            for name, param in pipe.controlnet.named_parameters():
-                if param.requires_grad:
-                    debug_print(f"{name}:")
-                    debug_print(f"- param_norm: {param.norm().item()}")
-                    if param.grad is not None:
-                        debug_print(f"- grad_norm: {param.grad.norm().item()}")
-
-        debug_print(pipe.controlnet.base_model.controlnet_cond_embedding.conv_in.lora_A.default.weight.grad.norm())
-
-        # After backward pass
-        debug_print("\n=== Debug: Gradient Flow ===")
-        debug_print("ControlNet gradients:")
-        for name, param in pipe.controlnet.named_parameters():
-            if param.requires_grad:
-                grad_norm = param.grad.norm().item() if param.grad is not None else 0.0
-                if grad_norm > 0:
-                    debug_print(f"- {name}: {grad_norm:.6f}")
-
-        debug_print("\nUNet gradients:")
-        for name, param in pipe.unet.named_parameters():
-            if param.requires_grad:
-                grad_norm = param.grad.norm().item() if param.grad is not None else 0.0
-                if grad_norm > 0:
-                    debug_print(f"- {name}: {grad_norm:.6f}")
-
-        # Add after backward pass
-        for name, param in pipe.controlnet.named_parameters():
-            if param.requires_grad and param.grad is None:
-                print(f"Warning: {name} has no gradient")
 
         # Add these new debug statements
         debug_print("\nPipeline configuration:")

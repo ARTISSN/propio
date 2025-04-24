@@ -2,7 +2,7 @@
 --extra-index-url https://download.pytorch.org/whl/cu118
 --find-links https://download.pytorch.org/whl/torch_stable.html
 torch>=2.1.1
-torchvision==0.16.1+cu118
+torchvision==0.17.1+cu118
 accelerate==0.27.0
 transformers>=4.36.0
 diffusers>=0.25.0

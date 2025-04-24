@@ -13,6 +13,7 @@ from utils.lighting_utils import LightingProcessor
 from utils.embedding_utils import get_face_embedding
 import numpy as np
 from utils.keep_alive import prevent_sleep, allow_sleep
+import torch
 
 class CharacterPipeline:
     def __init__(self, character_name: str, base_path: str = "data"):
@@ -238,7 +239,7 @@ class CharacterPipeline:
                         "coefficients": lighting_data["lighting_coefficients"],
                         "generated_at": timestamp
                     },
-                    "embedding": embedding.tolist() if isinstance(embedding, np.ndarray) else embedding
+                    "embedding": embedding.tolist() if isinstance(embedding, torch.Tensor) else embedding
                 })
                 
                 # Add processing step to history

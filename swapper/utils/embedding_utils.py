@@ -6,6 +6,8 @@ import numpy as np
 import os
 import json
 from pathlib import Path
+from typing import Optional
+import torch
 
 # Default paths for local execution
 DEFAULT_SHAPE_PREDICTOR = "models/shape_predictor_68_face_landmarks.dat"
@@ -16,7 +18,7 @@ face_detector = None
 shape_predictor = None
 face_rec_model = None
 
-def initialize_models():
+def initialize_models(shape_predictor_path: str, face_rec_path: str):
     """Initialize dlib models lazily when needed"""
     global face_detector, shape_predictor, face_rec_model
     
@@ -25,7 +27,8 @@ def initialize_models():
         
         # First try environment variables
         shape_predictor_path = os.getenv("DLIB_SHAPE_PREDICTOR")
-        face_rec_path = os.getenv("DLIB_FACE_REC_MODEL")
+        if not face_rec_path:
+            face_rec_path = os.getenv("DLIB_FACE_REC_MODEL")
         
         # If not in env vars, check local models directory
         if not shape_predictor_path or not os.path.exists(shape_predictor_path):
@@ -95,52 +98,64 @@ def download_models(models_dir: str = "models"):
             os.remove(compressed_path)
             print(f"Successfully downloaded and extracted {model_name}")
 
-def get_face_embedding(image_path: str, character_path: str = None) -> np.ndarray:
-    """Extract 128D facial embedding from an image file path."""
+def get_face_embedding(image_input, shape_predictor_path: str, face_rec_model_path: str, debug_dir: Optional[Path] = None) -> torch.Tensor:
+    """Extract 128D facial embedding from an image file path or image data."""
     try:
-        initialize_models()  # Ensure models are loaded
+        initialize_models(shape_predictor_path, face_rec_model_path)  # Pass paths to initialize models
     except RuntimeError as e:
         # If models aren't found, try downloading them
         print("Models not found, attempting to download...")
         download_models()
-        initialize_models()
+        initialize_models(shape_predictor_path, face_rec_model_path)
     
-    print(f"\nProcessing image: {image_path}")
-    print(f"Image exists: {os.path.exists(image_path)}")
-    
-    img = cv2.imread(image_path)
-    if img is None:
-        raise FileNotFoundError(f"Could not load image: {image_path}")
-    
+    if isinstance(image_input, str):
+        img = cv2.imread(image_input)
+        if img is None:
+            raise FileNotFoundError(f"Could not load image: {image_input}")
+    else:
+        img = image_input
+
+    # Save the image for debugging if debug_dir is provided
+    if debug_dir:
+        debug_image_path = debug_dir / f"debug_image_{np.random.randint(1000)}.png"
+        cv2.imwrite(str(debug_image_path), img)
+        print(f"Saved debug image to {debug_image_path}")
+
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     detections = face_detector(img_rgb, 1)
 
+    print(f"Number of faces detected: {len(detections)}")
     if len(detections) == 0:
-        print(f"No face found in {image_path}")
+        print("No face found in image")
         return None
 
     shape = shape_predictor(img_rgb, detections[0])
     embedding = face_rec_model.compute_face_descriptor(img_rgb, shape)
     embedding_np = np.array(embedding)
 
-    # Optional: Save to metadata.json
-    if character_path is not None:
-        meta_path = os.path.join(character_path, "metadata.json")
-        with open(meta_path, "r") as f:
-            metadata = json.load(f)
+    # Convert embedding to a PyTorch tensor
+    embedding_tensor = torch.tensor(embedding_np, dtype=torch.float32)
 
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
+    # Optional: Save to metadata.json if image_input is a path
+    if isinstance(image_input, str):
+        character_path = os.path.dirname(image_input)
+        if character_path:
+            meta_path = os.path.join(character_path, "metadata.json")
+            with open(meta_path, "r") as f:
+                metadata = json.load(f)
 
-        # Add empty containers if not present
-        if "frames" not in metadata: metadata["frames"] = {}
-        if base_name not in metadata["frames"]: metadata["frames"][base_name] = {}
+            base_name = os.path.splitext(os.path.basename(image_input))[0]
 
-        metadata["frames"][base_name]["embedding"] = embedding_np.tolist()
+            # Add empty containers if not present
+            if "frames" not in metadata: metadata["frames"] = {}
+            if base_name not in metadata["frames"]: metadata["frames"][base_name] = {}
 
-        with open(meta_path, "w") as f:
-            json.dump(metadata, f, indent=2)
+            metadata["frames"][base_name]["embedding"] = embedding_np.tolist()
 
-    return embedding_np
+            with open(meta_path, "w") as f:
+                json.dump(metadata, f, indent=2)
+
+    return embedding_tensor
 
 def get_face_embedding_from_array(image_array: np.ndarray) -> np.ndarray:
     """Extract 128D facial embedding from an image array (OpenCV RGB)."""

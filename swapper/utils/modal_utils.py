@@ -316,6 +316,15 @@ def train_remote(character_name: str, training_config: Optional[Dict] = None):
         os.environ["HF_HOME"] = f"{CACHE_MOUNT}/huggingface"
         os.environ["TORCH_HOME"] = f"{CACHE_MOUNT}/torch"
         os.environ["MODAL_CACHE_DIR"] = CACHE_MOUNT
+
+        # Set the DLIB_SHAPE_PREDICTOR environment variable
+        dlib_shape_predictor_path = os.path.join(CACHE_MOUNT, "models", "shape_predictor_68_face_landmarks.dat")
+        if os.path.exists(dlib_shape_predictor_path):
+            os.environ["DLIB_SHAPE_PREDICTOR"] = dlib_shape_predictor_path
+            print(f"Set DLIB_SHAPE_PREDICTOR to: {os.environ['DLIB_SHAPE_PREDICTOR']}")
+        else:
+            print(f"WARNING: DLIB_SHAPE_PREDICTOR path does not exist: {dlib_shape_predictor_path}")
+        
         # Print mount points and volumes for debugging
         print("\nDebug volume mounts:")
         print(f"Current directory: {os.getcwd()}")
