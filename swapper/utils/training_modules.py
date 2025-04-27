@@ -2,15 +2,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from peft.tuners.lora import LoraLayer
+from models.lighting_mlp import LightingMLP
 
-class GatingMLP(nn.Module):
-    def __init__(self, in_dim, num_modalities):
+class JointModel(nn.Module):
+    def __init__(self, id_dim, light_dim, spatial_dim, fuse_dim, hidden_dim,
+                 unet_dim, ctrl_dim, num_heads=8):
         super().__init__()
-        self.proj = nn.Linear(in_dim, num_modalities)
-    def forward(self, x):
-        # x: [B, seq_len, in_dim]  → logits [B, seq_len, M]
-        logits = self.proj(x)
-        return torch.sigmoid(logits).unsqueeze(-1)  # [B,seq_len,M,1]
+        # Fuse identity, lighting, normals → fused embedding
+        self.fusion = MultiModalFusion(id_dim, light_dim, spatial_dim, fuse_dim, num_heads)
+        # Optionally refine lighting
+        self.lighting_mlp = LightingMLP(light_dim, hidden_dim, hidden_dim)
+        # Project fused embedding into UNet & ControlNet cross-attention spaces
+        self.unet_proj = nn.Linear(fuse_dim, unet_dim)
+        self.ctrl_proj = nn.Linear(fuse_dim, ctrl_dim)
+
+    def forward(self, identity, lighting, normal_map):
+        # refine lighting
+        light_emb = self.lighting_mlp(lighting)
+        # fuse all modalities
+        fused = self.fusion(identity, light_emb, normal_map)
+        # project into each model’s attention dim
+        cross_unet  = self.unet_proj(fused).unsqueeze(1)     # [B,1,2048]
+        cross_ctrl  = self.ctrl_proj(fused).unsqueeze(1)     # [B,1,2048]
+        return cross_unet, cross_ctrl
 
 class AdaptiveLoraLayer(LoraLayer):
     """

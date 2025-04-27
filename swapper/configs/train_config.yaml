@@ -29,6 +29,7 @@ model:
   lambda_identity: 0.25
   lighting_dim: 16
   hidden_dim: 512
+  output_dim: 2048 
   ema_decay: 0.9999
   bias: none
   task_type: UNET

@@ -216,13 +216,16 @@ def process_image(image_path, ref_brightness, output_dir, face_mesh):
     padding = 100
     image = image[top - padding:bottom + padding, left - padding:right+padding]
 
-   #save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_crop/' + base_name
+    save_path = os.path.join(os.path.dirname(image_path), 'processed', 'tempy', base_name)
     #if you want to look at the cropped images
-    #cv2.imwrite(save_path + '.png', image)
+    cv2.imwrite(save_path + '.png', image)
 
     #now we have the cropped image so just do face detection again
     # Convert the BGR image to RGB before processing
     results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    # Save the cropped image for debugging
+    #debug_path = os.path.join(os.path.dirname(image_path), 'debug_cropped.png')
+    #cv2.imwrite(debug_path, image)
 
     if not results.multi_face_landmarks:
         print(f"No face detected in: {image_path} cropped")
