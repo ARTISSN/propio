@@ -526,7 +526,7 @@ def create_blended_normal_map(
     return blended_normal_map, face_square, square_mask, ao_map
 
 
-def blender_render(obj_path, cam_pos, cam_dir):
+def blender_render(obj_path, cam_pos, cam_dir, light_dir):
 
     # Path to save the rendered image
     output_path = "/Users/rainergardner-olesen/Desktop/Artissn/face_swap/propio/utils/blender_base_render.png"
@@ -701,16 +701,30 @@ def blender_render(obj_path, cam_pos, cam_dir):
     bpy.context.scene.camera = camera
 
 
-    # Set up lighting (simple point light)
+    # Set up lighting
+    bpy.ops.object.light_add(type='SUN', location=(5, -5, 5))
+    light = bpy.context.active_object
+    light.data.energy = 5  # Adjust light intensity as needed
+    # You can also adjust the light's rotation to change the direction of the light
+    light_dir_1 = mathutils.Vector((light_dir[0], light_dir[1], light_dir[2]))
+    light_dir_1 = light_dir_1 * -1
+    light_dir_1.normalize()
+    rot_quat = light_dir_1.to_track_quat('-Z', 'Y')  # Track -Z to light_dir, keeping Y up
+    light.rotation_euler = rot_quat.to_euler()
+
+     # Set up lighting
     bpy.ops.object.light_add(type='SUN', location=(5, -5, 5))
     light = bpy.context.active_object
     light.data.energy = 1  # Adjust light intensity as needed
     # You can also adjust the light's rotation to change the direction of the light
-    light.rotation_euler = (math.radians(-90), 0, math.radians(180))  # Adjust these values to change the direction
+    light_dir_2 = mathutils.Vector((light_dir[0], light_dir[1], light_dir[2]))
+    light_dir_2.normalize()
+    rot_quat = light_dir_2.to_track_quat('-Z', 'Y')  # Track -Z to light_dir, keeping Y up
+    light.rotation_euler = rot_quat.to_euler()
 
     # Set render settings
-    bpy.context.scene.render.resolution_x = 500
-    bpy.context.scene.render.resolution_y = 500
+    bpy.context.scene.render.resolution_x = 512
+    bpy.context.scene.render.resolution_y = 512
     bpy.context.scene.render.image_settings.file_format = 'PNG'
 
     # Set the output file path
@@ -723,6 +737,7 @@ def blender_render(obj_path, cam_pos, cam_dir):
         cam.data.ortho_scale = 1.0  # tweak as needed
 
     # Render the scene
+    #bpy.context.scene.render.engine = 'CYCLES'
     bpy.ops.render.render(write_still=True)
 
     print("Blender render complete and saved to:", output_path)
@@ -742,7 +757,8 @@ def draw_landmarks(
         DrawingSpec, Mapping[Tuple[int, int], DrawingSpec]
     ] = DrawingSpec(),
     is_drawing_landmarks: bool = True,
-    obj_path: Optional[str] = None
+    obj_path: Optional[str] = None,
+    light_dir = None
 ):
   """Draws the landmarks and the connections on the image."""
   if not landmark_list or image.shape[2] != _BGR_CHANNELS:
@@ -775,7 +791,7 @@ def draw_landmarks(
       cam_pos = (0,-1.2,0)
       cam_dir = mathutils.Vector((0,1,0))
       print("BLEND")
-      blended_normal_map = blender_render(obj_path=obj_path, cam_pos=cam_pos, cam_dir=cam_dir)
+      blended_normal_map = blender_render(obj_path=obj_path, cam_pos=cam_pos, cam_dir=cam_dir, light_dir=light_dir)
       
       vertices, faces = __load_obj_vertices_faces(obj_path)
       the_normal_map, face_image, mask, ao_map = create_blended_normal_map(
@@ -861,4 +877,5 @@ def draw_landmarks(
           cv2.circle(image, landmark_px, drawing_spec.circle_radius,
                     grayscale, drawing_spec.thickness)
   
+  print("FINISHED DRAW LANDMARKS")
   return blended_normal_map

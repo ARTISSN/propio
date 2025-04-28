@@ -8,6 +8,7 @@ if script_dir not in sys.path:
     sys.path.append(script_dir)
 
 import cv2
+import json
 import mediapipe as mp
 import numpy as np
 import trimesh
@@ -171,7 +172,7 @@ prev_face = None
 prev_face_crop = None
 
 
-def process_image(image_path, ref_brightness, output_dir, face_mesh, idx):
+def process_image(image_path, ref_brightness, output_dir, face_mesh, idx, light_dir):
     """Process a single image and save its face cutout and normal map."""
     # Create output paths
     base_name = Path(image_path).stem
@@ -195,7 +196,7 @@ def process_image(image_path, ref_brightness, output_dir, face_mesh, idx):
     #SAVE PATH IS JUST FOR VIEWING THE IMAGES AFTER THEY'VE BEEN BRIGHTENED
     #YOU CAN PASS THROUGH THE HISTOGRAM FUNCTION IF YOU WANT TO SAVE THE IMAGES ON YOUR COMPUTER BUT YOU DON'T HAVE TO
     #save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_img_brigthness/' + base_name
-    image = cvb.match_histogram_lab(image, ref_image)
+    #image = cvb.match_histogram_lab(image, ref_image)
 
     # Convert the BGR image to RGB before processing
     results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
@@ -263,7 +264,7 @@ def process_image(image_path, ref_brightness, output_dir, face_mesh, idx):
 
 
     #now we crop it with padding which can be whatever we want
-    padding = 100
+    padding = 0
     cropped_image = image[top - padding:bottom + padding, left - padding:right+padding]
     global frame_transformations
     #these are the values you want to subtract from the x and y values of each pixel
@@ -273,10 +274,10 @@ def process_image(image_path, ref_brightness, output_dir, face_mesh, idx):
     #     for c in range (cropped_image.shape[1]):
     #         image[r + frame_trans[idx][1]][c + frame_trans[idx][0]] = 0
     
-    # save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_crop/' + base_name
-    # #if you want to look at the cropped images
-    # print("SAVING IMAGE")
-    # cv2.imwrite(save_path + '.png', cropped_image)
+    save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_crop_daniel/' + base_name
+    #if you want to look at the cropped images
+    print("SAVING IMAGE TEST CROP")
+    cv2.imwrite(save_path + '.png', cropped_image)
 
     #now we have the cropped image so just do face detection again
     # Convert the BGR image to RGB before processing
@@ -319,18 +320,21 @@ def process_image(image_path, ref_brightness, output_dir, face_mesh, idx):
         connections=None,
         landmark_drawing_spec=mp_drawing.DrawingSpec(thickness=1, circle_radius=1),
         connection_drawing_spec=None,
-        obj_path=obj_path)
+        obj_path=obj_path,
+        light_dir = light_dir)
     
-    normal_map = cv2.resize(normal_map, (cropped_image.shape[0], cropped_image.shape[1]), interpolation=cv2.INTER_LINEAR)
+    #normal_map = cv2.resize(normal_map, (cropped_image.shape[0], cropped_image.shape[1]), interpolation=cv2.INTER_LINEAR)
+    normal_map = cv2.resize(normal_map, (512, 512), interpolation=cv2.INTER_LINEAR)
+    print("RESIZED")
     for r in range (normal_map.shape[0]):
         for c in range (normal_map.shape[1]):
             if normal_map[r][c].all(0):
                 image[r + frame_transformations[idx][1]][c + frame_transformations[idx][0]] = normal_map[r][c]
     
-    save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_crop/' + base_name
+    save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/daniel_test/' + base_name
     #if you want to look at the cropped images
-    print("SAVING IMAGE")
-    cv2.imwrite(save_path + '.png', image)
+    print("SAVING IMAGE PUT BACK")
+    cv2.imwrite(save_path + '.png', normal_map)
     
     # The face cutout and normal map are saved inside draw_landmarks
     # We should rename them to match our naming convention
@@ -364,8 +368,14 @@ def process_directory(input_dir, output_dir):
     # Sort the list numerically using extract_number
     image_files = sorted(image_files, key=extract_number)
 
+    #json file for lighting info
+    with open('/Users/rainergardner-olesen/Desktop/Artissn/face_swap/propio/metadata.json', 'r') as file:
+        lighting_data = json.load(file)
+    
+
+
     #reference image at full brightness (frame 200)
-    refer_img = image_files[200]
+    refer_img = image_files[3]
     global frame_transformations
     #initialize list of frame transformations for each frame
     frame_transformations = [[] for _ in range(len(image_files))]
@@ -383,7 +393,13 @@ def process_directory(input_dir, output_dir):
         for idx, image_path in enumerate(image_files):
             (f"Processing image {idx + 1}/{len(image_files)}: {image_path}")
             try:
-                process_image(str(image_path), str(refer_img), output_dir, face_mesh, idx)
+                # Get the filename without directory
+                filename = os.path.basename(image_path)
+                # Remove the extension
+                root_name = os.path.splitext(filename)[0] 
+
+                light_dir = lighting_data["frames"][root_name]["lighting"]["sun"]
+                process_image(str(image_path), str(refer_img), output_dir, face_mesh, idx, light_dir)
             except Exception as e:
                 print(f"Error processing {image_path}: {str(e)}")
                 continue
@@ -410,4 +426,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-process_directory('/Users/rainergardner-olesen/Desktop/Artissn/face_swap/propio/data/characters/documale1/source/images', '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/propio/utils/output_faces')
+#process_directory('/Users/rainergardner-olesen/Desktop/Artissn/face_swap/propio/data/characters/documale1/source/images', '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/propio/utils/output_faces')
