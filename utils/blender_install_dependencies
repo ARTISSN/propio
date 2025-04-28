@@ -1,0 +1,53 @@
+import sys
+import subprocess
+import importlib
+
+# List of packages you want to ensure are installed
+REQUIRED_PACKAGES = [
+    "numpy",
+    "opencv-python",
+    "mediapipe",
+    "trimesh",
+    "pyvista",
+]
+
+def ensure_package_installed(package_name, import_name=None):
+    """
+    Checks if a package is installed, and installs it if missing.
+    
+    Args:
+        package_name (str): Name to install with pip.
+        import_name (str): Name to import (if different).
+    """
+    import_name = import_name or package_name
+    try:
+        importlib.import_module(import_name)
+        print(f"✔️ {import_name} already installed.")
+    except ImportError:
+        print(f"➔ {import_name} not found. Installing...")
+        python_executable = sys.executable
+        subprocess.check_call([python_executable, "-m", "pip", "install", package_name])
+        print(f"✅ Installed {package_name}.")
+
+# Try installing all required packages
+for pkg in REQUIRED_PACKAGES:
+    ensure_package_installed(pkg)
+
+# Also add your custom modules to sys.path if needed
+import os
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.append(script_dir)
+
+# Now you can safely import everything!
+import bpy
+import numpy as np
+import cv2
+import mediapipe as mp
+import trimesh
+import pyvista as pv
+import opencv_brightness as cvb
+import drawing_utils as mp_drawing
+from pathlib import Path
+import argparse
+import os

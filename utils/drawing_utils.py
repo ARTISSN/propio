@@ -15,6 +15,10 @@
 
 import dataclasses
 import math
+import mathutils
+import bpy
+import bmesh
+import addon_utils
 from typing import List, Mapping, Optional, Tuple, Union, Any
 
 import cv2
@@ -283,6 +287,7 @@ def create_normal_map(
   
   return normal_map, mask
 
+    
 def draw_surface_normals(
     image: np.ndarray,
     vertices: np.ndarray,
@@ -356,8 +361,10 @@ def create_blended_normal_map(
     smoothness=0.,
     intensity=1.,
     smooth_factor=1.0,
-    debug=False,
-    target_size=1024
+    debug=True,
+    target_size_x=1024,
+    target_size_y=1024,
+    target_size=512
 ):
     """
     Create a blended normal map by combining mesh-based and image-based normal maps.
@@ -393,6 +400,7 @@ def create_blended_normal_map(
     )
     
     if debug:
+        print("DEBUGGING")
         # Save mesh-based normal map for debugging
         cv2.imwrite('debug_mesh_normal_map.png', cv2.cvtColor(mesh_normal_map, cv2.COLOR_RGB2BGR))
         # Debug coordinate conversions
@@ -406,27 +414,29 @@ def create_blended_normal_map(
     # Set all non-face pixels to black
     face_only_image[~mesh_mask] = [0, 0, 0]
     
-    # Get the bounding box of the face mask
-    y_indices, x_indices = np.where(mesh_mask)
-    y_min, y_max = np.min(y_indices), np.max(y_indices)
-    x_min, x_max = np.min(x_indices), np.max(x_indices)
+    # # Get the bounding box of the face mask
+    # y_indices, x_indices = np.where(mesh_mask)
+    # y_min, y_max = np.min(y_indices), np.max(y_indices)
+    # x_min, x_max = np.min(x_indices), np.max(x_indices)
     
-    # Calculate the size of the square (use the larger dimension)
-    size = max(y_max - y_min, x_max - x_min)
+    # # Calculate the size of the square (use the larger dimension)
+    # size = max(y_max - y_min, x_max - x_min)
     
-    # Create a square image for the face data
-    face_square = np.zeros((size, size, 3), dtype=np.uint8)
+    # # Create a square image for the face data
+    # face_square = np.zeros((size, size, 3), dtype=np.uint8)
     
-    # Calculate the offset to center the face in the square
-    y_offset = (size - (y_max - y_min)) // 2
-    x_offset = (size - (x_max - x_min)) // 2
+    # # Calculate the offset to center the face in the square
+    # y_offset = (size - (y_max - y_min)) // 2
+    # x_offset = (size - (x_max - x_min)) // 2
+
+    # padding = 100
     
-    # Copy the face data to the square image
-    face_square[y_offset:y_offset + (y_max - y_min), 
-                x_offset:x_offset + (x_max - x_min)] = face_only_image[y_min:y_max, x_min:x_max]
+    # # Copy the face data to the square image
+    # face_square[y_offset - padding:y_offset + (y_max - y_min) + padding, 
+    #             x_offset - padding:x_offset + (x_max - x_min) + padding] = face_only_image[y_min:y_max, x_min:x_max]
     
     # Resize face_square to target size
-    face_square = cv2.resize(face_square, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+    face_square = cv2.resize(face_only_image, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
     
     if debug:
         # Save the square face-only image for debugging
@@ -439,14 +449,14 @@ def create_blended_normal_map(
     binary_mask = (mesh_mask * 255).astype(np.uint8)
     
     # Create square binary mask and resize to target size
-    square_binary_mask = np.zeros((size, size), dtype=np.uint8)
-    square_binary_mask[y_offset:y_offset + (y_max - y_min), 
-                      x_offset:x_offset + (x_max - x_min)] = binary_mask[y_min:y_max, x_min:x_max]
-    square_binary_mask = cv2.resize(square_binary_mask, (target_size, target_size), 
+    # square_binary_mask = np.zeros((size, size), dtype=np.uint8)
+    # square_binary_mask[y_offset:y_offset + (y_max - y_min), 
+    #                   x_offset:x_offset + (x_max - x_min)] = binary_mask[y_min:y_max, x_min:x_max]
+    square_binary_mask = cv2.resize(binary_mask, (target_size, target_size), 
                                   interpolation=cv2.INTER_NEAREST)
     
     # Generate image-based normal map using normal_map_generator
-    from utils.normal_map_generator import startConvert
+    from normal_map_generator import startConvert
     image_normal_map, ao_map = startConvert(
         input_file=temp_image_path,
         smooth=smoothness,
@@ -464,12 +474,12 @@ def create_blended_normal_map(
         debug_coordinate_conversions(image_normal_map, square_mask)
     
     # Create a square mesh normal map
-    square_mesh_normal = np.zeros((size, size, 3), dtype=np.uint8)
-    square_mesh_normal[y_offset:y_offset + (y_max - y_min), 
-                      x_offset:x_offset + (x_max - x_min)] = mesh_normal_map[y_min:y_max, x_min:x_max]
+    # square_mesh_normal = np.zeros((size, size, 3), dtype=np.uint8)
+    # square_mesh_normal[y_offset:y_offset + (y_max - y_min), 
+    #                   x_offset:x_offset + (x_max - x_min)] = mesh_normal_map[y_min:y_max, x_min:x_max]
     
     # Resize mesh normal map to target size
-    square_mesh_normal = cv2.resize(square_mesh_normal, (target_size, target_size), 
+    square_mesh_normal = cv2.resize(mesh_normal_map, (target_size, target_size), 
                                   interpolation=cv2.INTER_LINEAR)
     
     if debug:
@@ -515,7 +525,213 @@ def create_blended_normal_map(
     # Return all the processed maps instead of saving them
     return blended_normal_map, face_square, square_mask, ao_map
 
+
+def blender_render(obj_path, cam_pos, cam_dir):
+
+    # Path to save the rendered image
+    output_path = "/Users/rainergardner-olesen/Desktop/Artissn/face_swap/propio/utils/blender_base_render.png"
+    print("BOUTA CHECK")
+    # Clear existing objects
+    bpy.ops.object.select_all(action='SELECT')
+    print("CHEKCING HERE")
+    bpy.ops.object.delete(use_global=False)
+
+    # Import the .obj file
+    #bpy.ops.import_scene.obj(filepath=obj_path)
+    bpy.data.worlds["World"].node_tree.nodes["Background"].inputs[0].default_value = (0, 0, 0, 1)
+
+    bpy.ops.wm.obj_import(filepath=obj_path)
+    bpy.ops.object.modifier_add(type='SUBSURF')
+    bpy.context.object.modifiers["Subdivision"].levels = 2
+    
+    # 1. Save current selected object as "face"
+    face = bpy.context.object
+
+    # 2. Duplicate the "face" object and name it "face_dup"
+    face_dup = face.copy()
+    face_dup.data = face.data.copy()
+    face_dup.name = "face_dup"
+    bpy.context.collection.objects.link(face_dup)
+
+    # 3. Enter Edit Mode on face_dup and get its BMesh
+    bpy.context.view_layer.objects.active = face_dup
+    if bpy.context.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.mode_set(mode='EDIT')
+
+    bm = bmesh.from_edit_mesh(face_dup.data)
+
+    # Utility to update mesh after BMesh ops
+    def update():
+        bmesh.update_edit_mesh(face_dup.data)
+
+    # 4. Select vertices [468:478] and extrude them -0.1 on the Y axis
+    bm.verts.ensure_lookup_table()
+    for v in bm.verts:
+        v.select = False
+    verts_extrude = [bm.verts[i] for i in range(468, 478)]
+    for v in verts_extrude:
+        v.select = True
+    update()
+    faces_extrude = [f for f in bm.faces if all(v.index in range(468, 478) for v in f.verts)]
+    # Extrude the face region
+    res = bmesh.ops.extrude_face_region(bm, geom=faces_extrude)
+    new_verts = [ele for ele in res['geom'] if isinstance(ele, bmesh.types.BMVert)]
+       
+    global_vec = mathutils.Vector((0.0, -0.02, 0.0))
+    local_vec = face_dup.matrix_world.inverted().to_3x3() @ global_vec
+    bmesh.ops.translate(bm, verts=new_verts, vec=local_vec)
+    #bmesh.ops.translate(bm, verts=new_verts, vec=(0.0, 0.0, 0.02))
+    update()
+
+    # # 5. Select vertices [468:473] and [478:483] and scale them by [0.8, 1, 0.8]
+    # bm.verts.ensure_lookup_table()
+    # for v in bm.verts:
+    #     v.select = False
+    # verts_group1 = [bm.verts[i] for i in list(range(468, 473)) + list(range(478, 483))]
+    # for v in verts_group1:
+    #     v.select = True
+    # bmesh.ops.scale(bm, verts=verts_group1, vec=(0.8, 1.0, 0.8))
+    # update()
+
+    # # # 6. Select vertices [473:478] and [483:488] and scale by [0.8, 1, 0.8]
+    # bm.verts.ensure_lookup_table()
+    # for v in bm.verts:
+    #     v.select = False
+    # verts_group2 = [bm.verts[i] for i in list(range(473, 478)) + list(range(483, 488))]
+    # for v in verts_group2:
+    #     v.select = True
+    # bmesh.ops.scale(bm, verts=verts_group2, vec=(0.8, 1.0, 0.8))
+    # update()
+
+    # 7. Select all vertices [468:488] and separate into new object "irises"
+    bm.verts.ensure_lookup_table()
+    for v in bm.verts:
+        v.select = False
+    verts_sep = [bm.verts[i] for i in range(468, 488)]
+    for v in verts_sep:
+        v.select = True
+    # Separate geometry
+    #bm_dest = bmesh.new()
+
+    # # 4. Update Edit Mesh before operator
+    bmesh.update_edit_mesh(face_dup.data)
+
+    # #bmesh.ops.split(bm, geom=verts_sep, dest=bm_dest, use_only_faces=False)
+
+     # 1. Record existing objects
+    before_objects = set(bpy.data.objects)
+
+    # # 2. Perform the separation (assumes you're already in Edit Mode with something selected)
+    bpy.ops.mesh.separate(type='SELECTED')
+
+    update()
+
+    # 3. Switch back to Object Mode to work with objects
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # # 4. Record objects after separation
+    after_objects = set(bpy.data.objects)
+
+    # # 5. Find the new object(s)
+    irises = list(after_objects - before_objects)[0]
+    # print("After separation, objects are:")
+    # for obj in after_objects - before_objects:
+    #     print(obj.name, obj.type, len(obj.data.vertices))
+
+    
+    # print(irises.name, irises.type, len(irises.data.vertices))
+
+
+    # Create new mesh and object for "irises"
+    # new_me = bpy.data.meshes.new("irises")
+    # #bm_dest.to_mesh(new_me)
+    # #bm_dest.free()
+    # irises = bpy.data.objects.new("irises", new_me)
+    # bpy.context.collection.objects.link(irises)
+
+    # 8. Add Boolean modifier to face_dup that intersects with "irises"
+    # bool_mod = face_dup.modifiers.new(name="Iris_Intersect", type='BOOLEAN')
+    # bool_mod.object = irises
+    # bool_mod.operation = 'INTERSECT'
+    # bool_mod.solver = 'FAST'
+
+    # 9. Translate the resulting face_dup along Y axis by -0.001
+    #face_dup.location.y -= 0.01
+    #bmesh.ops.translate(face_dup.data, vec=[0,-0.2,0])
+
+    # 10. Hide the irises object from viewport and render
+    #irises.hide_viewport = True
+    #irises.hide_render = True
+
+    #1. Assign a solid black material to face_dup
+    mat_name = "face_dup_black"
+    mat = bpy.data.materials.get(mat_name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=mat_name)
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf:
+            bsdf.inputs["Base Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+    # Clear existing materials and assign
+    irises.data.materials.clear()
+    irises.data.materials.append(mat)
+
+    # 3. Set all polygons (faces) to use material index 0
+    for poly in irises.data.polygons:
+        poly.material_index = 0
+
+    # Set up the camera
+    bpy.ops.object.camera_add(location=(cam_pos))
+    camera = bpy.context.active_object
+
+     # Normalize the direction
+    cam_dir = cam_dir.normalized()
+    
+    # In Blender, the camera "looks" along its local -Z axis
+    forward = mathutils.Vector((0.0, 0.0, -1.0))
+    
+    # Compute the rotation that brings forward to target_direction
+    rotation = forward.rotation_difference(cam_dir)
+    
+    # Set the camera rotation
+    camera.rotation_mode = 'QUATERNION'
+    camera.rotation_quaternion = rotation
+
+    bpy.context.scene.camera = camera
+
+
+    # Set up lighting (simple point light)
+    bpy.ops.object.light_add(type='SUN', location=(5, -5, 5))
+    light = bpy.context.active_object
+    light.data.energy = 1  # Adjust light intensity as needed
+    # You can also adjust the light's rotation to change the direction of the light
+    light.rotation_euler = (math.radians(-90), 0, math.radians(180))  # Adjust these values to change the direction
+
+    # Set render settings
+    bpy.context.scene.render.resolution_x = 500
+    bpy.context.scene.render.resolution_y = 500
+    bpy.context.scene.render.image_settings.file_format = 'PNG'
+
+    # Set the output file path
+    bpy.context.scene.render.filepath = output_path
+
+    cam = bpy.context.scene.camera
+    if cam and cam.type == 'CAMERA':
+        cam.data.type = 'ORTHO'
+        # Optionally adjust orthographic scale
+        cam.data.ortho_scale = 1.0  # tweak as needed
+
+    # Render the scene
+    bpy.ops.render.render(write_still=True)
+
+    print("Blender render complete and saved to:", output_path)
+
+    return cv2.imread(output_path)
+
 def draw_landmarks(
+    target_size_x,
+    target_size_y,
     image: np.ndarray,
     landmark_list: Any,
     connections: Optional[List[Tuple[int, int]]] = None,
@@ -555,14 +771,22 @@ def draw_landmarks(
   # Draw surface normals if OBJ file is provided
   if obj_path:
     try:
+      #render blender
+      cam_pos = (0,-1.2,0)
+      cam_dir = mathutils.Vector((0,1,0))
+      print("BLEND")
+      blended_normal_map = blender_render(obj_path=obj_path, cam_pos=cam_pos, cam_dir=cam_dir)
+      
       vertices, faces = __load_obj_vertices_faces(obj_path)
-      blended_normal_map, face_image, mask, ao_map = create_blended_normal_map(
+      the_normal_map, face_image, mask, ao_map = create_blended_normal_map(
           image=image,
           landmark_list=landmark_list,
           vertices=vertices,
           faces=faces,
           obj_path=obj_path,
-          debug=False
+          debug=False,
+          target_size_x=target_size_x,
+          target_size_y=target_size_y
       )
       
       print(f"\nDebug shapes:")
@@ -636,3 +860,5 @@ def draw_landmarks(
                     drawing_spec.thickness)
           cv2.circle(image, landmark_px, drawing_spec.circle_radius,
                     grayscale, drawing_spec.thickness)
+  
+  return blended_normal_map

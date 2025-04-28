@@ -1,14 +1,22 @@
+import sys
+import os
+# Dynamically get the folder where mesh_utils.py is located
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Add that folder to sys.path
+if script_dir not in sys.path:
+    sys.path.append(script_dir)
+
 import cv2
 import mediapipe as mp
-import open3d as o3d
 import numpy as np
 import trimesh
 import pyvista as pv
-import os
 import argparse
 import opencv_brightness as cvb
 from pathlib import Path
 import drawing_utils as mp_drawing
+import bpy
 
 mp_drawing_styles = mp.solutions.drawing_styles
 mp_face_mesh = mp.solutions.face_mesh
@@ -17,9 +25,11 @@ def show_mesh(obj_path):
   mesh = pv.read(obj_path)
   mesh.plot()
 
+prev_obj = None
+
 def vertices2obj(vertices,out_path):
   # Load original .obj file
-  with open("utils/face_model_with_iris.obj", "r") as file:
+  with open("face_model_with_iris.obj", "r") as file:
       lines = file.readlines()
 
   # Convert vertices list to numpy array for rotation
@@ -41,13 +51,21 @@ def vertices2obj(vertices,out_path):
   # Our Z (forward) becomes OBJ's Z (forward)
   # Our X (right) becomes OBJ's X (right)
   obj_vertices = rotated_vertices.copy()
-  obj_vertices[:, 1] = -rotated_vertices[:, 1]  # Flip Y to match OBJ convention
+  #obj_vertices[:, 1] = -rotated_vertices[:, 1]  # Flip Y to match OBJ convention
+
 
   # Translate vertices to ensure all Y values are positive
-  min_y = np.min(obj_vertices[:, 1])
-  if min_y < 0:
-      obj_vertices[:, 1] -= min_y  # Add the absolute value of min_y to all Y coordinates
+#   min_y = np.min(obj_vertices[:, 1])
+#   if min_y < 0:
+#       obj_vertices[:, 1] -= min_y  # Add the absolute value of min_y to all Y coordinates
 
+#   #take avg of frame with last frame
+#   global prev_obj
+#   if prev_obj is not None:
+#       obj_vertices = (0.1) * obj_vertices + (0.9) * prev_obj
+
+#   prev_obj = obj_vertices
+      
   # Replace vertex lines
   new_lines = []
   vertex_index = 0
@@ -148,7 +166,12 @@ def generate_normal_maps(mesh_data, output_dir):
         'mask': mask  # Return the mask in case it's needed later
     }
 
-def process_image(image_path, ref_brightness, output_dir, face_mesh):
+frame_transformations = []
+prev_face = None
+prev_face_crop = None
+
+
+def process_image(image_path, ref_brightness, output_dir, face_mesh, idx):
     """Process a single image and save its face cutout and normal map."""
     # Create output paths
     base_name = Path(image_path).stem
@@ -182,12 +205,22 @@ def process_image(image_path, ref_brightness, output_dir, face_mesh):
         return None
 
     # Process the first face found
-    face_landmarks = results.multi_face_landmarks[0]
+    face_landmarks_crop = results.multi_face_landmarks[0]
+
+    # global prev_face_crop
+    # if prev_face_crop is not None:
+    #     for p in range (len(face_landmarks_crop.landmark)):
+    #         face_landmarks_crop.landmark[p].x = (0.2 * face_landmarks_crop.landmark[p].x) + (0.8 * prev_face_crop.landmark[p].x)
+    #         face_landmarks_crop.landmark[p].y = (0.2 * face_landmarks_crop.landmark[p].y) + (0.8 * prev_face_crop.landmark[p].y)
+    #         face_landmarks_crop.landmark[p].z = (0.2 * face_landmarks_crop.landmark[p].z) + (0.8 * prev_face_crop.landmark[p].z)
+
+    # prev_face_crop = face_landmarks_crop
+
 
     #find the max x and y of the landmarks for bounding and cropping
     min_x = min_y = float("inf")
     max_x = max_y = float("-inf")
-    for lm in face_landmarks.landmark:
+    for lm in face_landmarks_crop.landmark:
         x = lm.x
         y = lm.y
 
@@ -213,17 +246,41 @@ def process_image(image_path, ref_brightness, output_dir, face_mesh):
     top = int(topmost.y * h)
     bottom = int(bottommost.y * h)
 
+    x_size = right - left
+    y_size = bottom - top
+    dim_diff = x_size - y_size
+
+    #x_size is larger
+    if dim_diff > 0:
+        #increase top and bottom
+        top -= int(np.floor(dim_diff/2))
+        bottom += int(np.ceil(dim_diff/2))
+    #y_size is larger
+    else:
+        #increase left and right
+        left += int(np.floor(dim_diff/2))
+        right -= int(np.ceil(dim_diff/2))
+
+
     #now we crop it with padding which can be whatever we want
     padding = 100
-    image = image[top - padding:bottom + padding, left - padding:right+padding]
+    cropped_image = image[top - padding:bottom + padding, left - padding:right+padding]
+    global frame_transformations
+    #these are the values you want to subtract from the x and y values of each pixel
+    frame_transformations[idx] = [left - padding, top - padding]
 
-   #save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_crop/' + base_name
-    #if you want to look at the cropped images
-    #cv2.imwrite(save_path + '.png', image)
+    # for r in range (cropped_image.shape[0]):
+    #     for c in range (cropped_image.shape[1]):
+    #         image[r + frame_trans[idx][1]][c + frame_trans[idx][0]] = 0
+    
+    # save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_crop/' + base_name
+    # #if you want to look at the cropped images
+    # print("SAVING IMAGE")
+    # cv2.imwrite(save_path + '.png', cropped_image)
 
     #now we have the cropped image so just do face detection again
     # Convert the BGR image to RGB before processing
-    results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    results = face_mesh.process(cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB))
 
     if not results.multi_face_landmarks:
         print(f"No face detected in: {image_path} cropped")
@@ -231,18 +288,31 @@ def process_image(image_path, ref_brightness, output_dir, face_mesh):
 
     # Process the first face found
     face_landmarks = results.multi_face_landmarks[0]
-    
+
+    #take average of current face and previous one
+    # global prev_face
+    # if prev_face is not None:
+    #     for p in range (len(face_landmarks.landmark)):
+    #         face_landmarks.landmark[p].x = (0.2 * face_landmarks.landmark[p].x) + (0.8 * prev_face.landmark[p].x)
+    #         face_landmarks.landmark[p].y = (0.2 * face_landmarks.landmark[p].y) + (0.8 * prev_face.landmark[p].y)
+    #         face_landmarks.landmark[p].z = (0.2 * face_landmarks.landmark[p].z) + (0.8 * prev_face.landmark[p].z)
+
+    # prev_face = face_landmarks
+
     # Convert landmarks to vertices
     vertices = []
+    #we want to use an offset since 0,0 represnets the top left corner of the image but 0,0,0 represents the center of 3d space in blender
     for landmark in face_landmarks.landmark:
-        vertices.append([landmark.x, landmark.y, landmark.z])
+        vertices.append([landmark.x - 0.5, landmark.y - 0.5, landmark.z])
     
     # Generate OBJ file
     obj_path = vertices2obj(vertices, obj_output_path)
     
     # Draw landmarks and generate normal map
-    annotated_image = image.copy()
-    mp_drawing.draw_landmarks(
+    annotated_image = cropped_image.copy()
+    normal_map = mp_drawing.draw_landmarks(
+        target_size_x=cropped_image.shape[1],
+        target_size_y=cropped_image.shape[0],
         image=annotated_image,
         is_drawing_landmarks=False,
         landmark_list=face_landmarks,
@@ -250,6 +320,17 @@ def process_image(image_path, ref_brightness, output_dir, face_mesh):
         landmark_drawing_spec=mp_drawing.DrawingSpec(thickness=1, circle_radius=1),
         connection_drawing_spec=None,
         obj_path=obj_path)
+    
+    normal_map = cv2.resize(normal_map, (cropped_image.shape[0], cropped_image.shape[1]), interpolation=cv2.INTER_LINEAR)
+    for r in range (normal_map.shape[0]):
+        for c in range (normal_map.shape[1]):
+            if normal_map[r][c].all(0):
+                image[r + frame_transformations[idx][1]][c + frame_transformations[idx][0]] = normal_map[r][c]
+    
+    save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_crop/' + base_name
+    #if you want to look at the cropped images
+    print("SAVING IMAGE")
+    cv2.imwrite(save_path + '.png', image)
     
     # The face cutout and normal map are saved inside draw_landmarks
     # We should rename them to match our naming convention
@@ -259,6 +340,12 @@ def process_image(image_path, ref_brightness, output_dir, face_mesh):
         os.rename('debug_blended_normal_map.png', normal_output_path)
     
     return True
+
+import re
+
+def extract_number(path):
+    match = re.search(r'\d+', path.stem)  # path.stem = filename without extension
+    return int(match.group()) if match else -1
 
 def process_directory(input_dir, output_dir):
     """Process all images in the input directory and save results to output directory."""
@@ -274,8 +361,16 @@ def process_directory(input_dir, output_dir):
         print(f"No image files found in {input_dir}")
         return
     
+    # Sort the list numerically using extract_number
+    image_files = sorted(image_files, key=extract_number)
+
     #reference image at full brightness (frame 200)
     refer_img = image_files[200]
+    global frame_transformations
+    #initialize list of frame transformations for each frame
+    frame_transformations = [[] for _ in range(len(image_files))]
+    for frame in frame_transformations:
+        frame = [0,0]
 
     # Initialize face mesh
     with mp_face_mesh.FaceMesh(
@@ -288,7 +383,7 @@ def process_directory(input_dir, output_dir):
         for idx, image_path in enumerate(image_files):
             (f"Processing image {idx + 1}/{len(image_files)}: {image_path}")
             try:
-                process_image(str(image_path), str(refer_img), output_dir, face_mesh)
+                process_image(str(image_path), str(refer_img), output_dir, face_mesh, idx)
             except Exception as e:
                 print(f"Error processing {image_path}: {str(e)}")
                 continue
@@ -300,10 +395,19 @@ def main():
                         help='Directory containing input face images')
     parser.add_argument('--output_dir', type=str, default='output_faces',
                         help='Directory to save processed faces and normal maps')
-    args = parser.parse_args()
+    
+    # Only parse args after "--"
+    if "--" in sys.argv:
+        argv = sys.argv[sys.argv.index("--") + 1:]
+    else:
+        argv = []
+
+    args = parser.parse_args(argv)
     
     # Process the directory
     process_directory(args.input_dir, args.output_dir)
 
 if __name__ == "__main__":
     main()
+
+process_directory('/Users/rainergardner-olesen/Desktop/Artissn/face_swap/propio/data/characters/documale1/source/images', '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/propio/utils/output_faces')
