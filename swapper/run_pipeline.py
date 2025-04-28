@@ -338,7 +338,7 @@ def main():
                 "training_name": args.training_name
             }
             
-            result = modal_utils.run_modal_train(args.character, training_config)
+            result = modal_utils.run_modal_train_im2im(args.character)
             if isinstance(result, dict) and result.get("status") == "error":
                 print(f"Training failed: {result.get('message')}")
             else:
