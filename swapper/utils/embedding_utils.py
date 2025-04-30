@@ -98,8 +98,19 @@ def download_models(models_dir: str = "models"):
             os.remove(compressed_path)
             print(f"Successfully downloaded and extracted {model_name}")
 
-def get_face_embedding(image_input, shape_predictor_path: str, face_rec_model_path: str, debug_dir: Optional[Path] = None) -> torch.Tensor:
+def get_face_embedding(
+    image_input, 
+    shape_predictor_path: Optional[str] = None, 
+    face_rec_model_path: Optional[str] = None, 
+    debug_dir: Optional[Path] = None
+) -> torch.Tensor:
     """Extract 128D facial embedding from an image file path or image data."""
+    # Use defaults if not provided
+    if shape_predictor_path is None:
+        shape_predictor_path = DEFAULT_SHAPE_PREDICTOR
+    if face_rec_model_path is None:
+        face_rec_model_path = DEFAULT_FACE_REC_MODEL
+
     try:
         initialize_models(shape_predictor_path, face_rec_model_path)  # Pass paths to initialize models
     except RuntimeError as e:

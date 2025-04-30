@@ -6,9 +6,12 @@ import trimesh
 import pyvista as pv
 import os
 import argparse
-#import opencv_brightness as cvb
 from pathlib import Path
 import utils.drawing_utils as mp_drawing
+import utils.opencv_brightness as cvb
+import re
+
+REF_IMAGE = path = "C:\\Users\\balag\\ARTISSN\\Swapping\\propio\\swapper\\data\\characters\\documale1\\source\\images\\frame_00200.jpg"
 
 mp_drawing_styles = mp.solutions.drawing_styles
 mp_face_mesh = mp.solutions.face_mesh
@@ -72,27 +75,119 @@ def vertices2obj(vertices,out_path):
   print("OBJ file built successfully!")
   return out_path
 
-def generate_face_mesh(image_path, output_dir, face_mesh):
-    """Generate face mesh from an image and save as OBJ."""
-    # Create output paths
+def crop_face(image_path, face_mesh, output_dir, target_size=512):
+    """Crop face from image, preserve aspect ratio, and pad to fixed size."""
     base_name = Path(image_path).stem
-    obj_output_path = os.path.join(output_dir, f"{base_name}.obj")
+    output_path = os.path.join(output_dir, "processed", "faces", f"{base_name}.png")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    # Read and process image
+    # Read image
     image = cv2.imread(image_path)
     if image is None:
         print(f"Failed to read image: {image_path}")
         return None
-        
-    # Convert the BGR image to RGB before processing
-    results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-
+    
+    # Fix brightness
+    global REF_IMAGE
+    #image = cvb.match_histogram_lab(image, cv2.imread(REF_IMAGE))
+    
+    # Get image dimensions
+    h, w = image.shape[:2]
+    
+    # Detect face landmarks with image dimensions
+    results = face_mesh.process(
+        cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    )
+    
     if not results.multi_face_landmarks:
         print(f"No face detected in: {image_path}")
         return None
-
-    # Process the first face found
+    
     face_landmarks = results.multi_face_landmarks[0]
+    
+    # Find face bounds
+    min_x = min_y = float("inf")
+    max_x = max_y = float("-inf")
+    for lm in face_landmarks.landmark:
+        x, y = lm.x, lm.y
+        min_x = min(min_x, x)
+        max_x = max(max_x, x)
+        min_y = min(min_y, y)
+        max_y = max(max_y, y)
+    
+    left = int(min_x * w)
+    right = int(max_x * w)
+    top = int(min_y * h)
+    bottom = int(max_y * h)
+    
+    # Add padding (optional, can be adjusted)
+    padding = 100
+    top = max(0, top - padding)
+    bottom = min(h, bottom + padding)
+    left = max(0, left - padding)
+    right = min(w, right + padding)
+    
+    # Crop as a rectangle (no square enforcement)
+    cropped_image = image[top:bottom, left:right]
+    crop_h, crop_w = cropped_image.shape[:2]
+    
+    # Compute scaling factor to fit within target_size
+    scale = min(target_size / crop_w, target_size / crop_h)
+    new_w = int(crop_w * scale)
+    new_h = int(crop_h * scale)
+    resized = cv2.resize(cropped_image, (new_w, new_h))
+    
+    # Create black background and paste resized crop in the center
+    padded = np.zeros((target_size, target_size, 3), dtype=np.uint8)
+    x_offset = (target_size - new_w) // 2
+    y_offset = (target_size - new_h) // 2
+    padded[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
+    
+    cv2.imwrite(output_path, padded)
+    print(f"Cropped image saved to: {output_path}")
+    
+    return {
+        'crop_path': output_path,
+        'original_bounds': (top, bottom, left, right),
+        'face_landmarks': face_landmarks
+    }
+
+def get_face_mesh_indices(landmark_list, image_width, image_height):
+    indices = []
+    for lm in landmark_list.landmark:
+        x_px = min(int(lm.x * image_width), image_width - 1)
+        y_px = min(int(lm.y * image_height), image_height - 1)
+        indices.append((x_px, y_px))
+    return indices
+
+def generate_face_mesh(image_path, character_dir, face_mesh):
+    """Generate face mesh from an image, first cropping the face."""
+    base_name = Path(image_path).stem
+    meshes_dir = os.path.join(character_dir, "processed", "meshes")
+    obj_output_path = os.path.join(meshes_dir, f"{base_name}.obj")
+    os.makedirs(meshes_dir, exist_ok=True)
+    
+    # Crop the face first
+    crop_result = crop_face(image_path, face_mesh, character_dir)
+    if not crop_result:
+        print(f"Failed to crop face from: {image_path}")
+        return None
+    
+    # Now process the cropped face
+    cropped_image = cv2.imread(crop_result['crop_path'])
+    if cropped_image is None:
+        print(f"Failed to read cropped image: {crop_result['crop_path']}")
+        return None
+    
+    # Process the cropped face
+    results = face_mesh.process(cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB))
+    if not results.multi_face_landmarks:
+        print(f"No face detected in cropped image: {crop_result['crop_path']}")
+        return None
+    
+    face_landmarks = results.multi_face_landmarks[0]
+
+    face_mesh_indices = get_face_mesh_indices(face_landmarks, cropped_image.shape[1], cropped_image.shape[0])
     
     # Convert landmarks to vertices
     vertices = []
@@ -101,25 +196,43 @@ def generate_face_mesh(image_path, output_dir, face_mesh):
     
     # Generate OBJ file
     obj_path = vertices2obj(vertices, obj_output_path)
-    
+
+    # After face_landmarks = results.multi_face_landmarks[0]
+    landmarks_list = []
+    for lm in face_landmarks.landmark:
+        lm_dict = {"x": lm.x, "y": lm.y, "z": lm.z}
+        if hasattr(lm, "visibility"):
+            lm_dict["visibility"] = lm.visibility
+        if hasattr(lm, "presence"):
+            lm_dict["presence"] = lm.presence
+        landmarks_list.append(lm_dict)
+
     return {
         'obj_path': obj_path,
         'landmarks': face_landmarks,
-        'image': image
+        'landmarks_list': landmarks_list,
+        'image': cropped_image,
+        'crop_bounds': crop_result['original_bounds'],
+        'face_mesh_indices': face_mesh_indices,
+        'crop_path': crop_result['crop_path']
     }
 
-def generate_normal_maps(mesh_data, output_dir):
+def generate_normal_maps(mesh_data, processed_dir):
     """Generate face cutout and normal maps from mesh data."""
     base_name = Path(mesh_data['obj_path']).stem
-    face_output_path = os.path.join(f"{output_dir}/faces", f"{base_name}.png")
-    normal_output_path = os.path.join(f"{output_dir}/normals", f"{base_name}.png")
-    ao_output_path = os.path.join(f"{output_dir}/ao", f"{base_name}_ao.png")
+    face_output_path = os.path.join(processed_dir, "faces", f"{base_name}.png")
+    normal_output_path = os.path.join(processed_dir, "normals", f"{base_name}.png")
+    ao_output_path = os.path.join(processed_dir, "ao", f"{base_name}_ao.png")
     
     # Draw landmarks and generate normal map
     annotated_image = mesh_data['image'].copy()
     
     # Load vertices and faces from the OBJ file
     vertices, faces = mp_drawing.__load_obj_vertices_faces(mesh_data['obj_path'])
+    
+    if not mesh_data['landmarks'] or len(mesh_data['landmarks'].landmark) == 0:
+        print(f"Warning: No landmarks found for {mesh_data['obj_path']}. Skipping.")
+        return None
     
     # Generate the maps
     normal_map, face_image, mask, ao_map = mp_drawing.create_blended_normal_map(
@@ -147,125 +260,20 @@ def generate_normal_maps(mesh_data, output_dir):
         'mask': mask  # Return the mask in case it's needed later
     }
 
-def process_image(image_path, ref_brightness, output_dir, face_mesh):
-    """Process a single image and save its face cutout and normal map."""
-    # Create output paths
-    base_name = Path(image_path).stem
-    face_output_path = os.path.join(output_dir, f"{base_name}.png")
-    normal_output_path = os.path.join(output_dir, f"{base_name}_normal.png")
-    obj_output_path = os.path.join(output_dir, f"{base_name}.obj")
-    
-    # Read and process image
-    image = cv2.imread(image_path)
-    #reference image
-    ref_image = cv2.imread(ref_brightness)
-    if image is None:
-        print(f"Failed to read image: {image_path}")
-        return None
-        
-    """PREPROCESSING HERE
-    - brighten image
-    - crop image to face (call face_mesh.process(image) x2)
-    """
-    
-    #SAVE PATH IS JUST FOR VIEWING THE IMAGES AFTER THEY'VE BEEN BRIGHTENED
-    #YOU CAN PASS THROUGH THE HISTOGRAM FUNCTION IF YOU WANT TO SAVE THE IMAGES ON YOUR COMPUTER BUT YOU DON'T HAVE TO
-    #save_path = '/Users/rainergardner-olesen/Desktop/Artissn/face_swap/brightness/test_img_brigthness/' + base_name
-    #image = cvb.match_histogram_lab(image, ref_image)
-
-    # Convert the BGR image to RGB before processing
-    results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-
-    if not results.multi_face_landmarks:
-        print(f"No face detected in: {image_path}")
-        return None
-
-    # Process the first face found
-    face_landmarks = results.multi_face_landmarks[0]
-
-    #find the max x and y of the landmarks for bounding and cropping
-    min_x = min_y = float("inf")
-    max_x = max_y = float("-inf")
-    for lm in face_landmarks.landmark:
-        x = lm.x
-        y = lm.y
-
-        if x < min_x:
-            min_x = x
-            leftmost = lm
-        if x > max_x:
-            max_x = x
-            rightmost = lm
-        if y < min_y:
-            min_y = y
-            topmost = lm
-        if y > max_y:
-            max_y = y
-            bottommost = lm
-
-    #since mediapipe coordinates are normalized between 0 and 1, we need to multiply by width and height to find pixels
-    h = image.shape[0]
-    w = image.shape[1]
-
-    left = int(leftmost.x * w)
-    right = int(rightmost.x * w)
-    top = int(topmost.y * h)
-    bottom = int(bottommost.y * h)
-
-    #now we crop it with padding which can be whatever we want
-    padding = 100
-    image = image[top - padding:bottom + padding, left - padding:right+padding]
-
-    save_path = os.path.join(os.path.dirname(image_path), 'processed', 'tempy', base_name)
-    #if you want to look at the cropped images
-    cv2.imwrite(save_path + '.png', image)
-
-    #now we have the cropped image so just do face detection again
-    # Convert the BGR image to RGB before processing
-    results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    # Save the cropped image for debugging
-    #debug_path = os.path.join(os.path.dirname(image_path), 'debug_cropped.png')
-    #cv2.imwrite(debug_path, image)
-
-    if not results.multi_face_landmarks:
-        print(f"No face detected in: {image_path} cropped")
-        return None
-
-    # Process the first face found
-    face_landmarks = results.multi_face_landmarks[0]
-    
-    # Convert landmarks to vertices
-    vertices = []
-    for landmark in face_landmarks.landmark:
-        vertices.append([landmark.x, landmark.y, landmark.z])
-    
-    # Generate OBJ file
-    obj_path = vertices2obj(vertices, obj_output_path)
-    
-    # Draw landmarks and generate normal map
-    annotated_image = image.copy()
-    mp_drawing.draw_landmarks(
-        image=annotated_image,
-        is_drawing_landmarks=False,
-        landmark_list=face_landmarks,
-        connections=None,
-        landmark_drawing_spec=mp_drawing.DrawingSpec(thickness=1, circle_radius=1),
-        connection_drawing_spec=None,
-        obj_path=obj_path)
-    
-    # The face cutout and normal map are saved inside draw_landmarks
-    # We should rename them to match our naming convention
-    if os.path.exists('debug_face_only_image.png'):
-        os.rename('debug_face_only_image.png', face_output_path)
-    if os.path.exists('debug_blended_normal_map.png'):
-        os.rename('debug_blended_normal_map.png', normal_output_path)
-    
-    return True
+def extract_number(path):
+    match = re.search(r'\d+', path.stem)  # path.stem = filename without extension
+    return int(match.group()) if match else -1
 
 def process_directory(input_dir, output_dir):
-    """Process all images in the input directory and save results to output directory."""
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
+    """Process all images in the input directory."""
+    # Create all necessary directories upfront
+    processed_dir = os.path.join(output_dir, "processed")
+    faces_dir = os.path.join(processed_dir, "faces")
+    meshes_dir = os.path.join(processed_dir, "meshes")
+    normals_dir = os.path.join(processed_dir, "normals")
+    
+    for dir_path in [processed_dir, faces_dir, meshes_dir, normals_dir]:
+        os.makedirs(dir_path, exist_ok=True)
     
     # Get list of image files
     image_files = []
@@ -276,9 +284,9 @@ def process_directory(input_dir, output_dir):
         print(f"No image files found in {input_dir}")
         return
     
-    #reference image at full brightness (frame 200)
-    refer_img = image_files[200]
-
+    # Sort numerically
+    image_files = sorted(image_files, key=extract_number)
+    
     # Initialize face mesh
     with mp_face_mesh.FaceMesh(
         static_image_mode=True,
@@ -286,13 +294,33 @@ def process_directory(input_dir, output_dir):
         refine_landmarks=True,
         min_detection_confidence=0.3) as face_mesh:
         
-        # Process each image
+        # First pass: crop all faces
+        cropped_faces = []
         for idx, image_path in enumerate(image_files):
-            (f"Processing image {idx + 1}/{len(image_files)}: {image_path}")
+            print(f"Cropping face {idx + 1}/{len(image_files)}: {image_path}")
             try:
-                process_image(str(image_path), str(refer_img), output_dir, face_mesh)
+                result = crop_face(str(image_path), face_mesh, output_dir)
+                if result:
+                    cropped_faces.append(result)
             except Exception as e:
-                print(f"Error processing {image_path}: {str(e)}")
+                print(f"Error cropping {image_path}: {str(e)}")
+                continue
+        
+        # Second pass: generate meshes from cropped faces
+        for face_data in cropped_faces:
+            try:
+                mesh_data = generate_face_mesh(
+                    face_data['crop_path'],
+                    meshes_dir,  # Use the specific meshes directory
+                    face_mesh
+                )
+                if mesh_data:
+                    # Pass the processed directory for normal maps
+                    generate_normal_maps(mesh_data, processed_dir)
+            except Exception as e:
+                print(f"Error processing {face_data['crop_path']}: {str(e)}")
+                import traceback
+                traceback.print_exc()  # Add this to get more detailed error information
                 continue
 
 def main():

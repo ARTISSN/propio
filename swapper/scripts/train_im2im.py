@@ -2,7 +2,7 @@
 """
 train_mesh2face_lora.py
 
-Fine-tunes a Low-Rank Adapter (LoRA) on top of SDXL’s U-Net
+Fine-tunes a Low-Rank Adapter (LoRA) on top of SDXL's U-Net
 to learn a mesh→photoreal face mapping for your character.
 Uses paired mesh renders (input) and FLUX-generated portraits (target).
 """
@@ -10,131 +10,503 @@ Uses paired mesh renders (input) and FLUX-generated portraits (target).
 import os
 import argparse
 from pathlib import Path
-
+import modal
 import torch
-from torch.utils.data import Dataset, DataLoader
-from diffusers import StableDiffusionXLImg2ImgPipeline
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+if not hasattr(torch, "uint1"):
+    torch.uint1 = torch.bool
+from typing import Optional
+from torch.utils.data import Dataset, DataLoader, random_split
+import torch.nn as nn
+from torch.nn import functional as F
+from diffusers import StableDiffusionXLImg2ImgPipeline, DDPMScheduler
+from peft import LoraConfig, get_peft_model
 from torchvision import transforms as T
 from PIL import Image
+import yaml
+from accelerate import Accelerator
+import datetime
+from diffusers.training_utils import EMAModel
+from transformers import get_cosine_schedule_with_warmup
 
 # ─── 1) CONFIGURATION ─────────────────────────────────────────────────────────
-def parse_args():
-    p = argparse.ArgumentParser(description="Train SDXL mesh→face LoRA")
-    p.add_argument("--mesh-dir",    type=Path, default="dataset/meshes",
-                   help="Directory of mesh render PNGs")
-    p.add_argument("--ref-dir",     type=Path, default="dataset/refs",
-                   help="Directory of FLUX reference PNGs")
-    p.add_argument("--out-dir",     type=Path, default="sdxl_mesh2face_lora",
-                   help="Where to save the trained LoRA weights")
-    p.add_argument("--base-model",  type=str,
-                   default="stabilityai/stable-diffusion-xl-base-1.0",
-                   help="SDXL checkpoint for fine-tuning")
-    p.add_argument("--batch-size",  type=int, default=4)
-    p.add_argument("--lr",          type=float, default=1e-4)
-    p.add_argument("--epochs",      type=int, default=10)
-    p.add_argument("--rank",        type=int, default=4,
-                   help="LoRA rank (r)")
-    p.add_argument("--alpha",       type=int, default=16,
-                   help="LoRA alpha multiplier")
-    return p.parse_args()
+
+MOUNT_ROOT = "/workspace"
+DATA_MOUNT = f"{MOUNT_ROOT}/data/characters"
+CACHE_MOUNT = f"{MOUNT_ROOT}/cache"
+CHARACTER_DATA_VOLUME = modal.Volume.from_name("character-data", create_if_missing=True)
+CACHE_VOLUME = modal.Volume.from_name("model-cache", create_if_missing=True)  # Single volume for all caches
 
 # ─── 2) DATASET ────────────────────────────────────────────────────────────────
 class MeshFaceDataset(Dataset):
-    def __init__(self, mesh_dir: Path, ref_dir: Path, transform):
-        self.mesh_paths = sorted(mesh_dir.glob("*.png"))
-        self.ref_paths  = sorted(ref_dir.glob("*.png"))
-        assert len(self.mesh_paths) == len(self.ref_paths), \
-            "Mesh and ref counts do not match!"
+    def __init__(self, character_path: Path, transform):
+        # Load blacklist if it exists
+        blacklist_path = character_path / "blacklist.txt"
+        if blacklist_path.exists():
+            with open(blacklist_path, "r") as f:
+                blacklist = set(line.strip() for line in f if line.strip())
+        else:
+            blacklist = set()
+
+        # Gather all renders and faces, filter by blacklist
+        all_renders = sorted((character_path / "processed" / "renders").glob("*.png"))
+        all_faces = sorted((character_path / "processed" / "faces").glob("*.png"))
+
+        # Only keep pairs where the stem is not in the blacklist
+        self.renders = []
+        self.faces = []
+        for r, f in zip(all_renders, all_faces):
+            stem = r.stem
+            if stem not in blacklist:
+                self.renders.append(r)
+                self.faces.append(f)
+
+        assert len(self.renders) == len(self.faces), \
+            "Render and face counts do not match after applying blacklist!"
         self.tf = transform
 
     def __len__(self):
-        return len(self.mesh_paths)
+        return len(self.renders)
 
     def __getitem__(self, idx):
-        mesh_img = Image.open(self.mesh_paths[idx]).convert("RGB")
-        ref_img  = Image.open(self.ref_paths[idx]).convert("RGB")
-        return self.tf(mesh_img), self.tf(ref_img)
+        render_img = Image.open(self.renders[idx]).convert("RGB")
+        face_img  = Image.open(self.faces[idx]).convert("RGB")
+        return self.tf(render_img), self.tf(face_img)
 
-# ─── 3) TRAINING LOOP ──────────────────────────────────────────────────────────
-def train_lora(args):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+# ─── 3) HELPER FUNCTIONS ──────────────────────────────────────────────────────
+def training_step(
+    pipe,
+    batch,
+    noise_scheduler,
+    device,
+    accelerator=None,
+    optimizer=None,
+    lr_scheduler=None,
+    unet_ema=None,
+    is_training=True,
+    config=None
+):
+    """
+    Performs a single training/validation step.
+    
+    Args:
+        pipe: SDXL pipeline
+        batch: Tuple of (mesh_imgs, ref_imgs)
+        noise_scheduler: Noise scheduler
+        device: Device to run on
+        accelerator: Accelerator instance (only needed for training)
+        optimizer: Optimizer (only needed for training)
+        lr_scheduler: Learning rate scheduler (only needed for training)
+        unet_ema: EMA model (only needed for training)
+        is_training: Whether this is a training step
+        config: Training configuration
+    
+    Returns:
+        dict: Loss values and predictions
+    """
+    mesh_imgs, ref_imgs = batch
+    mesh_imgs = mesh_imgs.to(device).float()    # -> torch.cuda.FloatTensor
+    ref_imgs  = ref_imgs.to(device).float()
 
-    # 3.1 Load the SDXL img2img pipeline
-    pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-        args.base_model,
-        torch_dtype=torch.float16 if device=="cuda" else torch.float32,
-    ).to(device)
+    sf = pipe.vae.config.scaling_factor
+    mesh_latents = pipe.vae.encode(mesh_imgs).latent_dist.sample() * sf
+    ref_latents  = pipe.vae.encode(ref_imgs).latent_dist.sample() * sf
 
-    # 3.2 Prepare U-Net for LoRA training
-    pipe.unet = prepare_model_for_kbit_training(pipe.unet)
-    lora_cfg = LoraConfig(
-        r=args.rank,
-        lora_alpha=args.alpha,
-        target_modules=["down_blocks", "mid_block", "up_blocks"],
-        bias="none",
+    mesh_latents = mesh_latents.half()          # -> torch.cuda.HalfTensor
+    ref_latents  = ref_latents.half()
+
+    # 3) sample noise & timesteps
+    noise = torch.randn_like(ref_latents)
+    timesteps = torch.randint(
+        0,
+        noise_scheduler.config.num_train_timesteps,
+        (mesh_latents.shape[0],),
+        device=device,
     )
-    pipe.unet = get_peft_model(pipe.unet, lora_cfg)
+    noisy_ref = noise_scheduler.add_noise(ref_latents, noise, timesteps)
 
-    # 3.3 Build DataLoader
-    transform = T.Compose([
-        T.Resize((512,512)),
-        T.ToTensor(),
-        T.Normalize([0.5]*3, [0.5]*3),
-    ])
-    ds = MeshFaceDataset(args.mesh_dir, args.ref_dir, transform)
-    dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True)
+    # 4) prompt → cross-attention & pooled embeddings
+    seq_embeds, _, pooled_embeds, _ = pipe.encode_prompt(
+        ["<rrrdaniel>"] * mesh_latents.shape[0],
+        device=device,
+        num_images_per_prompt=1,
+        do_classifier_free_guidance=False,
+    )
 
-    # 3.4 Optimizer & Scheduler (optional)
-    optim = torch.optim.AdamW(pipe.unet.parameters(), lr=args.lr)
+    # 5) micro-conditioning (optional; drop if you want simpler)
+    H, W = mesh_imgs.shape[-2:]
+    add_time_ids, add_neg_time_ids = pipe._get_add_time_ids(
+        original_size=(H, W),
+        crops_coords_top_left=(0, 0),
+        target_size=(H, W),
+        aesthetic_score=0.0,
+        negative_aesthetic_score=0.0,
+        negative_original_size=(H, W),
+        negative_crops_coords_top_left=(0, 0),
+        negative_target_size=(H, W),
+        dtype=seq_embeds.dtype,
+        text_encoder_projection_dim=pooled_embeds.shape[-1],
+    )
+    add_time_ids     = add_time_ids.repeat(mesh_latents.shape[0], 1).to(device)
+    add_neg_time_ids = add_neg_time_ids.repeat(mesh_latents.shape[0], 1).to(device)
 
-    # 3.5 Training
-    pipe.scheduler = pipe.scheduler  # already configured in the pipeline
-    for epoch in range(1, args.epochs + 1):
-        pipe.unet.train()
-        total_loss = 0.0
-        for mesh_imgs, ref_imgs in dl:
-            mesh_imgs = mesh_imgs.to(device)
-            ref_imgs  = ref_imgs.to(device)
-            # Encode to latents
-            mesh_latents = pipe.vae.encode(mesh_imgs).latent_dist.sample()
-            ref_latents  = pipe.vae.encode(ref_imgs ).latent_dist.sample()
+    # 6) cast everything to half if your UNet is fp16
+    """mesh_latents     = mesh_latents.half()
+    noisy_ref        = noisy_ref.half()
+    seq_embeds       = seq_embeds.half()
+    pooled_embeds    = pooled_embeds.half()
+    add_time_ids     = add_time_ids.half()
+    add_neg_time_ids = add_neg_time_ids.half()"""
 
-            # Sample timestep & noise
-            timesteps = torch.randint(0, pipe.scheduler.num_train_timesteps,
-                                      (mesh_latents.shape[0],),
-                                      device=device)
-            noise = torch.randn_like(ref_latents)
-            noisy_ref = pipe.scheduler.add_noise(ref_latents, noise, timesteps)
-
-            # Forward UNet on noisy mesh latents
+    with torch.autograd.set_detect_anomaly(True):
+        with accelerator.autocast():
+            # 7) forward
             noise_pred = pipe.unet(
                 noisy_ref,
                 timesteps,
-                encoder_hidden_states=pipe.text_encoder(  # embedding of "<rrrdaniel>"
-                    torch.tensor([[pipe.tokenizer("<rrrdaniel>", return_tensors="pt")["input_ids"][0]]],
-                                 device=device)
-                ),
-                added_cond_kwargs={"orig_image_latents": mesh_latents},
+                encoder_hidden_states=seq_embeds,
+                added_cond_kwargs={
+                    "orig_image_latents": mesh_latents,      # mesh→output latents
+                    "text_embeds":        pooled_embeds,     # pooled prompt embedding
+                    "time_ids":           add_time_ids,      # micro-conditioning
+                    "neg_time_ids":       add_neg_time_ids,  # negative-aesthetic branch
+                },
             ).sample
 
-            # Compute loss & backward
-            loss = torch.nn.functional.mse_loss(noise_pred, noise)
-            loss.backward()
-            optim.step()
-            optim.zero_grad()
+            # 8) loss
+            loss = F.mse_loss(noise_pred.float(), noise.float())
+            print("loss debug:")
+            print(loss)
 
-            total_loss += loss.item() * mesh_imgs.size(0)
+    if is_training:
+        optimizer.zero_grad(set_to_none=True)
+        accelerator.backward(loss)
+        #accelerator.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(pipe.unet.parameters(), max_norm=1.0)
+        total_norm = torch.norm(
+            torch.stack([g.detach().float().norm() for g in pipe.unet.parameters() if g.grad is not None])
+        )
+        print("Gradient norm:", total_norm.item())  
+        optimizer.step()
+        lr_scheduler.step()
+        for n, p in pipe.unet.named_parameters():
+            if "lora_" in n:
+                print(f"{n}: mean={p.data.mean():.3e}, std={p.data.std():.3e}")
 
-        avg = total_loss / len(ds)
-        print(f"Epoch {epoch}/{args.epochs} — avg loss: {avg:.4f}")
+        #scaler.update()
+        optimizer.zero_grad()
+        if accelerator.sync_gradients and unet_ema is not None:
+            unet_ema.step(pipe.unet.parameters())
 
-    # 3.6 Save the LoRA adapters
-    os.makedirs(args.out_dir, exist_ok=True)
-    pipe.unet.save_pretrained(args.out_dir)
-    print(f"LoRA saved to {args.out_dir}")
+    raise Exception("Stop here")
 
-# ─── 4) ENTRY POINT ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    args = parse_args()
-    train_lora(args)
+    return {
+        "loss": loss,
+        "noise_pred": noise_pred,
+        "noise": noise,
+        "mesh_latents": mesh_latents,
+        "ref_latents": ref_latents
+    }
+
+# ─── 4) TRAINING LOOP ──────────────────────────────────────────────────────────
+def train_lora(character_name: str, output_dir: Optional[str] = None, from_checkpoint: bool = False):
+    print("\n=== Starting training setup ===")
+    
+    # Use provided output directory or create default
+    output_dir = Path(output_dir) if output_dir else Path(DATA_MOUNT) / character_name / "trainings" / f"training_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    print(f"\nTraining output will be saved to: {output_dir}")
+
+    # Initialize checkpoint variables
+    start_epoch = 0
+    global_step = 0
+    checkpoint_state = None
+    
+    # Load checkpoint if specified
+    if from_checkpoint:
+        print("\nLooking for checkpoint...")
+        checkpoint_dir = output_dir / "checkpoints"
+        if checkpoint_dir.exists():
+            checkpoint_files = list(checkpoint_dir.glob("checkpoint-*"))
+            if checkpoint_files:
+                latest_checkpoint = max(checkpoint_files, key=lambda x: x.stat().st_mtime)
+                print(f"Found latest checkpoint: {latest_checkpoint}")
+            else:
+                print("No checkpoints found, starting fresh training")
+                from_checkpoint = False
+        else:
+            print("No checkpoints directory found, starting fresh training")
+            from_checkpoint = False
+
+    # Use absolute paths with Path objects
+    data_mount = Path(DATA_MOUNT)  # From your constants
+    character_path = data_mount / character_name
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    modal_cache = os.getenv("MODAL_CACHE_DIR", "/workspace/cache")
+    sdxl_cache_path = os.path.join(modal_cache, "huggingface", "sdxl-base-1.0")
+        
+    # Load config
+    with open("configs/train_config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+        
+    accelerator = Accelerator(
+        mixed_precision=config["optimization"]["mixed_precision"],
+        gradient_accumulation_steps=config["training"]["gradient_accumulation_steps"]
+    )
+
+    print(f"Using device: {device}")
+    # Load the SDXL img2img pipeline
+    pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+        sdxl_cache_path,
+        torch_dtype=torch.float32,
+    ).to(device)
+    pipe.unet = pipe.unet.half()
+    
+    pipe.enable_attention_slicing()
+    pipe.enable_vae_slicing()
+    pipe.unet.enable_gradient_checkpointing()
+
+    # Prepare U-Net for LoRA training
+    lora_cfg = LoraConfig(
+        r=config["model"]["lora_rank"],
+        lora_alpha=config["model"]["lora_alpha"],
+        lora_dropout=config["model"]["lora_dropout"],
+        target_modules=[
+            "conv1", "conv2",       # ResNet blocks
+            "conv_shortcut",        # any skip-connections
+            "to_q", "to_k", "to_v", # attention
+            "proj_in", "proj_out"
+        ],
+        bias="none",
+    )
+    pipe.unet = get_peft_model(pipe.unet, lora_cfg)
+    pipe.unet = pipe.unet.to(device, dtype=torch.float16)
+
+
+    num_added = pipe.tokenizer.add_special_tokens({"additional_special_tokens":["<rrrdaniel>"]})
+    pipe.text_encoder.resize_token_embeddings(len(pipe.tokenizer))
+    if hasattr(pipe, "text_encoder_2"):
+        pipe.text_encoder_2.resize_token_embeddings(len(pipe.tokenizer))
+
+    # Build DataLoader
+    transform = T.Compose([
+        T.Resize((config["resolution"], config["resolution"])),
+        T.ToTensor(),
+        T.Normalize([0.5]*3, [0.5]*3),
+    ])
+    
+    # Initialize dataset and split into train/val
+    dataset = MeshFaceDataset(character_path, transform)
+    val_size = int(len(dataset) * 0.2)  # 20% for validation
+    train_size = len(dataset) - val_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config["training"]["batch_size"],
+        shuffle=True
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config["training"]["batch_size"],
+        shuffle=False
+    )
+
+    # Initialize optimizer
+    optimizer = torch.optim.AdamW(
+        pipe.unet.parameters(),
+        lr=float(config["training"]["learning_rate"]),
+    )
+
+    # Learning rate scheduler
+    num_training_steps = len(train_loader) * config["training"]["num_epochs"]
+    num_warmup_steps = int(num_training_steps * config["training"]["warmup_ratio"])
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+    )
+
+    # Noise scheduler
+    noise_scheduler = DDPMScheduler.from_pretrained(
+        sdxl_cache_path,
+        subfolder="scheduler"
+    )
+
+    # Initialize EMA
+    unet_ema = EMAModel(
+        pipe.unet.parameters(),
+        decay=0.9999,
+        model_cls=pipe.unet.__class__,
+        device=device
+    )
+
+    # Prepare models with accelerator
+    pipe.unet, optimizer, train_loader, val_loader, lr_scheduler = accelerator.prepare(
+        pipe.unet, optimizer, train_loader, val_loader, lr_scheduler
+    )
+    
+    # Convert data loaders to fp16
+    train_loader.dataset.dataset.tf = T.Compose([
+        T.ToTensor(),
+        T.Normalize([0.5]*3, [0.5]*3),
+        T.ConvertImageDtype(torch.float16)
+    ])
+    
+    val_loader.dataset.dataset.tf = T.Compose([
+        T.ToTensor(),
+        T.Normalize([0.5]*3, [0.5]*3),
+        T.ConvertImageDtype(torch.float16)
+    ])
+
+    # Training loop
+    best_loss = float('inf')
+    patience = config["training"].get("patience", 5)
+    patience_counter = 0
+
+    for epoch in range(start_epoch, config["training"]["num_epochs"]):
+        pipe.unet.train()
+        total_loss = 0.0
+        
+        for step, batch in enumerate(train_loader):
+            with accelerator.accumulate():
+                try:
+                    step_output = training_step(
+                        pipe=pipe,
+                        batch=batch,
+                        noise_scheduler=noise_scheduler,
+                        device=device,
+                        accelerator=accelerator,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        unet_ema=unet_ema,
+                        is_training=True,
+                        config=config
+                    )
+                except Exception as e:
+                    print(f"Error in training step: {e}")
+                    raise e
+                
+                total_loss += step_output["loss"].item()
+                print("total_loss debug:")
+                print(total_loss)
+                global_step += 1
+
+                # Logging
+                if global_step % config["training"].get("log_steps", 10) == 0:
+                    accelerator.print(
+                        f"\n=== Training Statistics ===\n"
+                        f"Epoch: {epoch}/{config['training']['num_epochs']} | "
+                        f"Step: {global_step}/{num_training_steps} | "
+                        f"Learning Rate: {optimizer.param_groups[0]['lr']:.6f}\n"
+                        f"Losses:\n"
+                        f"- Total: {step_output['loss']:.4f}\n"
+                    )
+
+                # Save checkpoint
+                if global_step % config["training"].get("save_steps", 500) == 0:
+                    if accelerator.is_main_process:
+                        checkpoint_path = output_dir / "checkpoints" / f"checkpoint-{epoch}-{global_step}"
+                        checkpoint_path.mkdir(parents=True, exist_ok=True)
+                        
+                        # Save model state
+                        pipe.unet.save_pretrained(checkpoint_path / "unet_lora.pt")
+                        
+                        # Save training state
+                        training_state = {
+                            "step": global_step,
+                            "epoch": epoch,
+                            "config": config,
+                            "optimizer": optimizer.state_dict(),
+                            "scheduler": lr_scheduler.state_dict(),
+                            "ema": unet_ema.state_dict()
+                        }
+                        torch.save(training_state, checkpoint_path / "training_state.pt")
+                        
+                        CHARACTER_DATA_VOLUME.commit()
+                        print("✅ Committed volume changes")
+
+        # Validation
+        pipe.unet.eval()
+        total_val_loss = 0.0
+        
+        # Store training weights and load EMA weights for validation
+        if unet_ema is not None:
+            unet_ema.store(pipe.unet.parameters())
+            unet_ema.copy_to(pipe.unet.parameters())
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                step_output = training_step(
+                    pipe=pipe,
+                    batch=batch,
+                    noise_scheduler=noise_scheduler,
+                    device=device,
+                    is_training=False,
+                    config=config
+                )
+                total_val_loss += step_output["loss"].item()
+
+        # Restore training weights if using EMA
+        if unet_ema is not None:
+            unet_ema.restore(pipe.unet.parameters())
+
+        avg_val_loss = total_val_loss / len(val_loader)
+        
+        # Early stopping
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
+            patience_counter = 0
+            
+            # Save best model
+            if accelerator.is_main_process:
+                unet_ema.store(pipe.unet.parameters())
+                best_model_path = output_dir / "best_model"
+                best_model_path.mkdir(parents=True, exist_ok=True)
+                
+                # Save LoRA state dict
+                torch.save(pipe.unet.state_dict(), best_model_path / "unet_lora.pt")
+                
+                # Save training state
+                training_state = {
+                    "best_loss": best_loss,
+                    "config": config,
+                    "ema": unet_ema.state_dict(),
+                    "base_model_path": "stabilityai/stable-diffusion-xl-base-1.0"
+                }
+                torch.save(training_state, best_model_path / "training_state.pt")
+                
+                CHARACTER_DATA_VOLUME.commit()
+                print("✅ Committed volume changes")
+                
+                unet_ema.restore(pipe.unet.parameters())
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered")
+                break
+
+    # Save final model
+    if accelerator.is_main_process:
+        final_path = output_dir / "final_model"
+        final_path.mkdir(parents=True, exist_ok=True)
+        
+        # Save final LoRA weights
+        torch.save(pipe.unet.state_dict(), final_path / "unet_lora.pt")
+        
+        # Save final training state
+        training_state = {
+            "config": config,
+            "ema": unet_ema.state_dict(),
+            "base_model_path": "stabilityai/stable-diffusion-xl-base-1.0"
+        }
+        torch.save(training_state, final_path / "training_state.pt")
+        CHARACTER_DATA_VOLUME.commit()
+        print("✅ Committed volume changes")
+
+    return {
+        "status": "success",
+        "message": f"Training completed for {character_name}",
+        "output_dir": str(output_dir)
+    }

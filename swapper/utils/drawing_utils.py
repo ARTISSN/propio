@@ -17,33 +17,13 @@ import dataclasses
 import math
 from typing import List, Mapping, Optional, Tuple, Union, Any
 
+#import bpy
+#import bmesh
+#import mathutils
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import utils.coordinate_utils as coordinate_utils
-
-try:
-  from mediapipe.framework.formats import detection_pb2
-  from mediapipe.framework.formats import landmark_pb2
-  from mediapipe.framework.formats import location_data_pb2
-except ImportError:
-    print("Warning: mediapipe not found. Some functionality may be limited.")
-    # Create dummy classes for the protobuf messages
-    class DummyProto:
-        def __init__(self):
-            self.landmark = []
-            self.location_data = None
-            self.HasField = lambda x: False
-            
-    class DummyLocationData:
-        def __init__(self):
-            self.RELATIVE_BOUNDING_BOX = 0
-            self.format = 0
-            self.relative_keypoints = []
-            
-    detection_pb2 = type('Detection', (), {'Detection': DummyProto})
-    landmark_pb2 = type('NormalizedLandmarkList', (), {'NormalizedLandmarkList': DummyProto})
-    location_data_pb2 = type('LocationData', (), {'LocationData': DummyLocationData})
 
 _PRESENCE_THRESHOLD = 0.5
 _VISIBILITY_THRESHOLD = 0.5
@@ -286,6 +266,9 @@ def draw_surface_normals(
   # Get landmark bounds
   landmark_xs = [coord[0] for coord in landmark_coordinates.values()]
   landmark_ys = [coord[1] for coord in landmark_coordinates.values()]
+  if not landmark_xs or not landmark_ys:
+    print("Warning: No valid landmarks provided for normal map generation. Skipping frame.")
+    return None, None
   landmark_min_x, landmark_max_x = min(landmark_xs), max(landmark_xs)
   landmark_min_y, landmark_max_y = min(landmark_ys), max(landmark_ys)
   landmark_width = landmark_max_x - landmark_min_x
@@ -333,8 +316,10 @@ def create_blended_normal_map(
     smoothness=0.,
     intensity=1.,
     smooth_factor=1.0,
-    debug=False,
-    target_size=1024
+    debug=True,
+    target_size_x=1024,
+    target_size_y=1024,
+    target_size=512
 ):
     """
     Create a blended normal map by combining mesh-based and image-based normal maps.
@@ -350,11 +335,9 @@ def create_blended_normal_map(
     image_rows, image_cols, _ = image_copy.shape
     idx_to_coordinates = {}
     for idx, landmark in enumerate(landmark_list.landmark):
-        if ((landmark.HasField('visibility') and
-             landmark.visibility < _VISIBILITY_THRESHOLD) or
-            (landmark.HasField('presence') and
-             landmark.presence < _PRESENCE_THRESHOLD)):
-            continue
+        if ((landmark.HasField('visibility') and landmark.visibility < 0) or
+          (landmark.HasField('presence') and landmark.presence < 0)):
+          continue
         landmark_px = __normalized_to_pixel_coordinates(landmark.x, landmark.y,
                                                    image_cols, image_rows)
         if landmark_px:
@@ -458,6 +441,7 @@ def create_blended_normal_map(
     mesh_weight = np.stack([mesh_weight] * 3, axis=2)
     
     # Blend the normal maps (now they have the same dimensions)
+    
     blended_normal_map = (
         cv2.cvtColor(square_mesh_normal, cv2.COLOR_RGB2BGR) * (1-mesh_weight) +
         image_normal_map * mesh_weight
@@ -493,6 +477,8 @@ def create_blended_normal_map(
     return blended_normal_map, face_square, square_mask, ao_map
 
 def draw_landmarks(
+    target_size_x,
+    target_size_y,
     image: np.ndarray,
     landmark_list: Any,
     connections: Optional[List[Tuple[int, int]]] = None,
@@ -505,111 +491,114 @@ def draw_landmarks(
     is_drawing_landmarks: bool = True,
     obj_path: Optional[str] = None
 ):
-  """Draws the landmarks and the connections on the image."""
-  if not landmark_list or image.shape[2] != _BGR_CHANNELS:
-    return
-  
-  # Collect landmarks
-  image_rows, image_cols, _ = image.shape
-  idx_to_coordinates = {}
-  idx_to_z = {}
-  
-  for idx, landmark in enumerate(landmark_list.landmark):
-    if ((landmark.HasField('visibility') and
-         landmark.visibility < _VISIBILITY_THRESHOLD) or
-        (landmark.HasField('presence') and
-         landmark.presence < _PRESENCE_THRESHOLD)):
-      continue
-    landmark_px = __normalized_to_pixel_coordinates(landmark.x, landmark.y,
-                                                   image_cols, image_rows)
-    if landmark_px:
-      idx_to_coordinates[idx] = landmark_px
-      idx_to_z[idx] = landmark.z
+    """Draws the landmarks and the connections on the image."""
+    if not landmark_list or image.shape[2] != _BGR_CHANNELS:
+        return None
+    
+    # Collect landmarks
+    image_rows, image_cols, _ = image.shape
+    idx_to_coordinates = {}
+    idx_to_z = {}
+    
+    for idx, landmark in enumerate(landmark_list.landmark):
+        if ((landmark.HasField('visibility') and
+             landmark.visibility < _VISIBILITY_THRESHOLD) or
+            (landmark.HasField('presence') and
+             landmark.presence < _PRESENCE_THRESHOLD)):
+            continue
+        landmark_px = __normalized_to_pixel_coordinates(landmark.x, landmark.y,
+                                                       image_cols, image_rows)
+        if landmark_px:
+            idx_to_coordinates[idx] = landmark_px
+            idx_to_z[idx] = landmark.z
 
-  # Create a copy of landmarks for later use
-  visible_landmarks = idx_to_coordinates.copy()
-  
-  # Draw surface normals if OBJ file is provided
-  if obj_path:
-    try:
-      vertices, faces = __load_obj_vertices_faces(obj_path)
-      blended_normal_map, face_image, mask, ao_map = create_blended_normal_map(
-          image=image,
-          landmark_list=landmark_list,
-          vertices=vertices,
-          faces=faces,
-          obj_path=obj_path,
-          debug=False
-      )
-      
-      print(f"\nDebug shapes:")
-      print(f"Image shape: {image.shape}")
-      print(f"Normal map shape: {blended_normal_map.shape}")
-      print(f"Mask shape: {mask.shape}")
-      print(f"Number of valid pixels: {np.sum(mask)}")
-      
-      # Only proceed with lighting estimation if we have valid pixels
-      if mask.any():
+    # Create a copy of landmarks for later use
+    visible_landmarks = idx_to_coordinates.copy()
+    
+    # Draw surface normals if OBJ file is provided
+    if obj_path:
         try:
-          from lighting_utils import estimate_lighting, calculate_lighting_from_normals, visualize_single_sphere
-          
-          num_bands = 2
-          
-          # Estimate lighting coefficients
-          lighting_coeffs, lighting_map,Y = estimate_lighting(blended_normal_map, mask, num_bands, True)
+            vertices, faces = __load_obj_vertices_faces(obj_path)
+            blended_normal_map, face_image, mask, ao_map = create_blended_normal_map(
+                image=image,
+                landmark_list=landmark_list,
+                vertices=vertices,
+                faces=faces,
+                obj_path=obj_path,
+                debug=False
+            )
+            
+            print(f"\nDebug shapes:")
+            print(f"Image shape: {image.shape}")
+            print(f"Normal map shape: {blended_normal_map.shape}")
+            print(f"Mask shape: {mask.shape}")
+            print(f"Number of valid pixels: {np.sum(mask)}")
+            
+            # Only proceed with lighting estimation if we have valid pixels
+            if mask.any():
+                try:
+                    from lighting_utils import estimate_lighting, calculate_lighting_from_normals, visualize_single_sphere
+                    
+                    num_bands = 2
+                    
+                    # Estimate lighting coefficients
+                    lighting_coeffs, lighting_map,Y = estimate_lighting(blended_normal_map, mask, num_bands, True)
 
-          # Get single sphere visualization with custom lighting coefficients
-          sphere_vis = visualize_single_sphere(lighting_coeffs)
-          cv2.imwrite('sphere_visualization.png', sphere_vis)
-          
-          # Calculate lighting map
-          lighting_map = calculate_lighting_from_normals(blended_normal_map, lighting_coeffs, mask, num_bands, Y)
-          
-          # Save or display the lighting map
-          cv2.imwrite('lighting_map.png', lighting_map)
-        except ImportError:
-          print("Warning: lighting_utils not found. Lighting calculation skipped.")
+                    # Get single sphere visualization with custom lighting coefficients
+                    sphere_vis = visualize_single_sphere(lighting_coeffs)
+                    cv2.imwrite('sphere_visualization.png', sphere_vis)
+                    
+                    # Calculate lighting map
+                    lighting_map = calculate_lighting_from_normals(blended_normal_map, lighting_coeffs, mask, num_bands, Y)
+                    
+                    # Save or display the lighting map
+                    cv2.imwrite('lighting_map.png', lighting_map)
+                except ImportError:
+                    print("Warning: lighting_utils not found. Lighting calculation skipped.")
+                except Exception as e:
+                    print(f"Warning: Failed to calculate lighting map: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # Restore original landmarks
+            idx_to_coordinates = visible_landmarks
+            
         except Exception as e:
-          print(f"Warning: Failed to calculate lighting map: {e}")
-          import traceback
-          traceback.print_exc()
-      
-      # Restore original landmarks
-      idx_to_coordinates = visible_landmarks
-      
-    except Exception as e:
-      print(f"Warning: Failed to draw surface normals: {e}")
-      import traceback
-      traceback.print_exc()
+            print(f"Warning: Failed to draw surface normals: {e}")
+            import traceback
+            traceback.print_exc()
 
-  # Draw connections
-  if connections:
-      num_landmarks = len(landmark_list.landmark)
-      for connection in connections:
-          start_idx, end_idx = connection
-          if not (0 <= start_idx < num_landmarks and 0 <= end_idx < num_landmarks):
-              raise ValueError(f'Invalid connection from landmark #{start_idx} to #{end_idx}.')
+    # Draw connections
+    if connections:
+        num_landmarks = len(landmark_list.landmark)
+        for connection in connections:
+            start_idx, end_idx = connection
+            if not (0 <= start_idx < num_landmarks and 0 <= end_idx < num_landmarks):
+                raise ValueError(f'Invalid connection from landmark #{start_idx} to #{end_idx}.')
 
-          if (start_idx in idx_to_coordinates and end_idx in idx_to_coordinates):
-              drawing_spec = connection_drawing_spec[connection] if isinstance(
-                  connection_drawing_spec, Mapping) else connection_drawing_spec
-              cv2.line(
-                  image,
-                  idx_to_coordinates[start_idx],
-                  idx_to_coordinates[end_idx],
-                  drawing_spec.color,
-                  drawing_spec.thickness,
-              )
+            if (start_idx in idx_to_coordinates and end_idx in idx_to_coordinates):
+                drawing_spec = connection_drawing_spec[connection] if isinstance(
+                    connection_drawing_spec, Mapping) else connection_drawing_spec
+                cv2.line(
+                    image,
+                    idx_to_coordinates[start_idx],
+                    idx_to_coordinates[end_idx],
+                    drawing_spec.color,
+                    drawing_spec.thickness,
+                )
 
-  # Draw landmarks
-  if is_drawing_landmarks and landmark_drawing_spec:
-      for idx, landmark_px in idx_to_coordinates.items():
-          drawing_spec = landmark_drawing_spec[idx] if isinstance(
-              landmark_drawing_spec, Mapping) else landmark_drawing_spec
-          grayscale = __get_grayscale_from_depth(idx_to_z[idx],min(idx_to_z.values()),max(idx_to_z.values()))
-          circle_border_radius = max(drawing_spec.circle_radius + 1,
-                                    int(drawing_spec.circle_radius * 1.2))
-          cv2.circle(image, landmark_px, circle_border_radius, grayscale,
-                    drawing_spec.thickness)
-          cv2.circle(image, landmark_px, drawing_spec.circle_radius,
-                    grayscale, drawing_spec.thickness)
+    # Draw landmarks
+    if is_drawing_landmarks and landmark_drawing_spec:
+        for idx, landmark_px in idx_to_coordinates.items():
+            drawing_spec = landmark_drawing_spec[idx] if isinstance(
+                landmark_drawing_spec, Mapping) else landmark_drawing_spec
+            grayscale = __get_grayscale_from_depth(idx_to_z[idx],min(idx_to_z.values()),max(idx_to_z.values()))
+            circle_border_radius = max(drawing_spec.circle_radius + 1,
+                                      int(drawing_spec.circle_radius * 1.2))
+            cv2.circle(image, landmark_px, circle_border_radius, grayscale,
+                      drawing_spec.thickness)
+            cv2.circle(image, landmark_px, drawing_spec.circle_radius,
+                      grayscale, drawing_spec.thickness)
+
+    # Return blended_normal_map if created, otherwise return None
+    return blended_normal_map if blended_normal_map is not None else None

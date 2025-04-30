@@ -14,6 +14,7 @@ from utils.embedding_utils import get_face_embedding
 import numpy as np
 from utils.keep_alive import prevent_sleep, allow_sleep
 import torch
+from utils.calculate_suns import compute_sun_direction, compute_top_suns
 
 class CharacterPipeline:
     def __init__(self, character_name: str, base_path: str = "data"):
@@ -90,14 +91,15 @@ class CharacterPipeline:
             static_image_mode=True,
             max_num_faces=1,
             refine_landmarks=True,
-            min_detection_confidence=0.5
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
         ) as face_mesh:
             print(f"Processing images in: {source_image_dir}")
             # Process each image in the source directory
             for img_path in source_image_dir.glob("*.*"):
                 print(f"Processing image: {img_path}")
                 try:
-                    mesh_data = generate_face_mesh(str(img_path), str(mesh_dir), face_mesh)
+                    mesh_data = generate_face_mesh(str(img_path), str(self.char_path), face_mesh)
                     
                     if mesh_data:
                         base_name = img_path.stem
@@ -112,9 +114,12 @@ class CharacterPipeline:
                         
                         self.metadata["frames"][base_name]["mesh"] = {
                             "path": str(Path(mesh_data['obj_path']).relative_to(self.base_path)),
-                            "generated_at": timestamp
+                            "generated_at": timestamp,
+                            "crop_path": str(Path(mesh_data['crop_path']).relative_to(self.base_path)),
+                            "landmarks": mesh_data['landmarks_list']
                         }
-                        
+                        # Save face mesh indices
+                        self.metadata["frames"][base_name]["face_mesh_indices"] = mesh_data['face_mesh_indices']
                         self.metadata["frames"][base_name]["processing_steps"].append({
                             "type": "mesh_generation",
                             "timestamp": timestamp
@@ -156,44 +161,37 @@ class CharacterPipeline:
         for mesh_path in mesh_files:
             base_name = mesh_path.stem
             try:
-                # Find source image
-                source_image = None
-                source_dir = self.char_path / "source/images"
-                for ext in ['.jpg', '.jpeg', '.png']:
-                    potential_source = source_dir / f"{base_name}{ext}"
-                    if potential_source.exists():
-                        source_image = potential_source
-                        break
-                
-                if not source_image:
-                    print(f"Warning: Could not find source image for mesh {base_name}")
+                # Use precomputed cropped face image and landmarks from metadata
+                frame_info = self.metadata["frames"][base_name]
+                cropped_face_path = None
+                landmarks = None
+
+                # Try to get the cropped face image path and landmarks
+                if "mesh" in frame_info and "crop_path" in frame_info["mesh"]:
+                    cropped_face_path = self.base_path / frame_info["mesh"]["crop_path"]
+                if "mesh" in frame_info and "landmarks" in frame_info["mesh"]:
+                    landmarks_data = frame_info["mesh"]["landmarks"]
+                    # Reconstruct the landmark list
+                    from mediapipe.framework.formats import landmark_pb2
+                    landmarks = landmark_pb2.NormalizedLandmarkList()
+                    for lm_dict in landmarks_data:
+                        lm = landmarks.landmark.add()
+                        lm.x = lm_dict["x"]
+                        lm.y = lm_dict["y"]
+                        lm.z = lm_dict["z"]
+                        if "visibility" in lm_dict:
+                            lm.visibility = lm_dict["visibility"]
+                        if "presence" in lm_dict:
+                            lm.presence = lm_dict["presence"]
+
+                if cropped_face_path is None or landmarks is None:
+                    print(f"Missing cropped face or landmarks for frame {base_name}")
                     continue
-                
-                # Generate face embedding
-                print(f"Generating embedding for {source_image}")
-                embedding = get_face_embedding(str(source_image))
-                if embedding is None:
-                    print(f"Warning: Could not generate embedding for {source_image}")
-                    embedding = [0.0] * 128  # Default embedding dimension
-                
-                # Read the source image
-                image = cv2.imread(str(source_image))
+
+                image = cv2.imread(str(cropped_face_path))
                 if image is None:
-                    print(f"Failed to read image: {source_image}")
+                    print(f"Failed to read cropped face image: {cropped_face_path}")
                     continue
-                
-                # Initialize face mesh to get landmarks
-                with mp.solutions.face_mesh.FaceMesh(
-                    static_image_mode=True,
-                    max_num_faces=1,
-                    refine_landmarks=True,
-                    min_detection_confidence=0.5
-                ) as face_mesh:
-                    results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-                    if not results.multi_face_landmarks:
-                        print(f"No face detected in: {source_image}")
-                        continue
-                    landmarks = results.multi_face_landmarks[0]
                 
                 # Generate maps
                 mesh_data = {
@@ -221,10 +219,15 @@ class CharacterPipeline:
                     print(f"Failed to calculate lighting for frame {base_name}")
                     continue
                 
+                # Calculate and store top suns
+                coeffs = lighting_data["lighting_coefficients"]
+                suns = compute_top_suns(coeffs, K=3)
+                self.metadata["frames"][base_name].setdefault("lighting", {})["suns"] = suns
+                
                 # Update metadata
                 if base_name not in self.metadata["frames"]:
                     self.metadata["frames"][base_name] = {
-                        "source_image": str(source_image.relative_to(self.base_path)),
+                        "source_image": str(cropped_face_path.relative_to(self.base_path)),
                         "processing_steps": []
                     }
                 
@@ -237,9 +240,9 @@ class CharacterPipeline:
                     },
                     "lighting": {
                         "coefficients": lighting_data["lighting_coefficients"],
+                        "suns": suns,
                         "generated_at": timestamp
                     },
-                    "embedding": embedding.tolist() if isinstance(embedding, torch.Tensor) else embedding
                 })
                 
                 # Add processing step to history

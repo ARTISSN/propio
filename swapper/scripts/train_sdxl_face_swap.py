@@ -849,21 +849,24 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
             unet_ema = EMAModel(
                 pipe.unet.parameters(),
                 decay=decay,
-                model_cls=pipe.unet.__class__
+                model_cls=pipe.unet.__class__,
+                device=accelerator.device
             )
 
             # Track ControlNet's LoRA parameters
             controlnet_ema = EMAModel(
                 pipe.controlnet.parameters(),
                 decay=decay,
-                model_cls=pipe.controlnet.__class__
+                model_cls=pipe.controlnet.__class__,
+                device=accelerator.device
             )
 
             # (Optional) Track Fusion's LoRA parameters too
             fusion_ema = EMAModel(
                 fusion.parameters(),
                 decay=decay,
-                model_cls=fusion.__class__
+                model_cls=fusion.__class__,
+                device=accelerator.device
             )
 
             # Then update both EMAs in the training loop
@@ -906,8 +909,8 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
         ctrl_proj    = nn.Linear(hidden_dim, pipe.controlnet.config.cross_attention_dim).to(accelerator.device)
 
         # Prepare models AFTER loading checkpoint
-        pipe.unet, pipe.controlnet, lighting_mlp, fusion, optimizer, train_loader, val_loader, lr_scheduler, unet_proj, ctrl_proj = accelerator.prepare(
-            pipe.unet, pipe.controlnet, lighting_mlp, fusion, optimizer, train_loader, val_loader, lr_scheduler, unet_proj, ctrl_proj
+        pipe.unet, pipe.vae, optimizer, train_loader, val_loader, lr_scheduler = accelerator.prepare(
+            pipe.unet, pipe.vae, optimizer, train_loader, val_loader, lr_scheduler
         )
 
         # Set the paths for the face detection models
@@ -1029,10 +1032,11 @@ def train(character_name: str, output_dir: Optional[str] = None, from_checkpoint
                         lr_scheduler.step()
                         optimizer.step()
 
-                        # immediately update EMA to "shadow" the new LoRA weights
-                        unet_ema.step(pipe.unet.parameters())
-                        controlnet_ema.step(pipe.controlnet.parameters())
-                        fusion_ema.step(fusion.parameters())
+                        # Move EMA update outside accumulation context
+                        if accelerator.sync_gradients:
+                            unet_ema.step(pipe.unet.parameters())
+                            controlnet_ema.step(pipe.controlnet.parameters())
+                            fusion_ema.step(fusion.parameters())
 
                         if global_step % config["training"].get("log_steps", 10) == 0:
                             # Get current learning rate

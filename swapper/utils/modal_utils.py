@@ -60,6 +60,12 @@ def _download_models_internal(cache_mount_path: str):
     """Internal function to download SDXL model without Modal decoration"""
     try:
         import torch
+        # alias any missing quant-dtypes
+        for name in range(1, 9):
+            name = "uint"+str(name)
+            if not hasattr(torch, name):
+                # pick closest real dtype: bool for 1-bit, uint8 for the rest
+                setattr(torch, name, torch.bool if name=="uint1" else torch.uint8)
         from diffusers import StableDiffusionXLPipeline
         import os
         
@@ -79,9 +85,7 @@ def _download_models_internal(cache_mount_path: str):
         print("Downloading SDXL base model...")
         pipe = StableDiffusionXLPipeline.from_pretrained(
             "stabilityai/stable-diffusion-xl-base-1.0",
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-            variant="fp16"
+            torch_dtype=torch.float32,
         )
             
         print(f"Saving model to cache: {cache_path}")
@@ -118,11 +122,11 @@ def debug_python_env():
     for pkg in pkg_resources.working_set:
         print(f"  {pkg.key} - Version: {pkg.version}")
 
-    print("\nDirectory structure:")
-    for root, dirs, files in os.walk("/root/swapper"):
-        print(f"\nDirectory: {root}")
-        print("  Files:", files)
-        print("  Subdirs:", dirs)
+    #print("\nDirectory structure:")
+    #for root, dirs, files in os.walk("/root/swapper"):
+    #    print(f"\nDirectory: {root}")
+    #    print("  Files:", files)
+    #    print("  Subdirs:", dirs)
 
 def validate_embeddings(metadata: dict) -> bool:
     print("\nValidating embeddings...")
@@ -299,7 +303,7 @@ def train_remote(character_name: str, training_config: Optional[Dict] = None):
         # Import the training module early
         print("\nImporting training module...")
         try:
-            from swapper.scripts import train_sdxl_face_swap as training_module
+            from swapper.scripts import train_im2im as training_module
             print("Successfully imported training module")
         except ImportError as e:
             print(f"Failed to import training module: {str(e)}")
@@ -356,7 +360,7 @@ def train_remote(character_name: str, training_config: Optional[Dict] = None):
         # Now use the already imported module
         print("Starting training...")
         # Update the output directory in the training function
-        result = training_module.train(
+        result = training_module.train_lora(
             character_name=character_name,
             output_dir=str(training_dir),
             from_checkpoint=bool(from_checkpoint)
