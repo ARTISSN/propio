@@ -488,11 +488,11 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                     )
 
                 # Save training preview
-                if global_step % config["training"].get("preview_steps", 100) == 0:
+                if global_step % config["training"].get("preview_steps", 50) == 0:
                     save_training_preview(pipe, batch, output_dir, global_step, accelerator.device, config)
 
                 # Save checkpoint
-                if (global_step - 1) % config["training"].get("save_steps", 500) == 0:
+                if global_step % config["training"].get("save_steps", 500) == 0:
                     if accelerator.is_main_process:
                         checkpoint_path = output_dir / "checkpoints" / f"checkpoint-{epoch}-{global_step}"
                         checkpoint_path.mkdir(parents=True, exist_ok=True)
@@ -500,6 +500,7 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                         # Save model state
                         pipe.unet.save_pretrained(checkpoint_path / "unet_lora.pt")
                         
+                        print("Saving model state")
                         # Save training state
                         training_state = {
                             "step": global_step,
