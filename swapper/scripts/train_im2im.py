@@ -102,9 +102,6 @@ def preencode_latents(pipe, tf, character_path, device="cuda"):
         mesh_img = tf(Image.open(r).convert("RGB")).to(device)
         ref_img  = tf(Image.open(f).convert("RGB")).to(device)
 
-        print(mesh_img.shape)
-        print(ref_img.shape)
-
         with torch.no_grad():
             mesh_latent = (vae.encode(mesh_img.unsqueeze(0)).latent_dist.sample() * vae.config.scaling_factor).squeeze(0)
             ref_latent  = (vae.encode(ref_img.unsqueeze(0)).latent_dist.sample() * vae.config.scaling_factor).squeeze(0)
@@ -116,25 +113,18 @@ def preencode_latents(pipe, tf, character_path, device="cuda"):
 def save_training_preview(pipe, batch, output_dir, step, device, config):
     pipe.unet.eval()
     with torch.no_grad():
-        pixel_values = batch["pixel_values"][0:1].to(device)
-        normal_map   = batch["normal_map"][0:1].to(device)
-        embedding    = batch["embedding"][0:1].to(device)
-        lighting     = batch["lighting"][0:1].to(device)
-        # Target image (ground truth)
-        target_img   = pixel_values[0].cpu()
-        # Run pipeline
+        pixel_values = batch[0][0:1].to(device)
+        target_img   = batch[1][0].cpu()
         output = pipe(
             image=pixel_values,
-            normal_map=normal_map,
-            embedding=embedding,
-            lighting=lighting,
+            prompt="<rrrdaniel>",
             num_inference_steps=20,
             guidance_scale=7.5,
         ).images[0]  # PIL Image
 
         # Convert tensors to PIL for side-by-side
         def tensor_to_pil(t):
-            t = (t * 0.5 + 0.5).clamp(0, 1)  # unnormalize
+            t = (t * 0.5 + 0.5).clamp(0, 1)
             t = (t * 255).byte().permute(1, 2, 0).cpu().numpy()
             return Image.fromarray(t)
 
@@ -154,7 +144,7 @@ def save_training_preview(pipe, batch, output_dir, step, device, config):
         preview_path = preview_dir / f"preview_step_{step}.png"
         preview.save(preview_path)
         print(f"✅ Saved training preview to {preview_path}")
-    pipe.train()
+    pipe.unet.train()
 
 def training_step(
     pipe,
@@ -385,7 +375,7 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
     transform = T.Compose([
         T.Resize((config["resolution"], config["resolution"])),
         T.ToTensor(),
-        T.Normalize([0.5]*3, [0.5]*3),
+        #T.Normalize([0.5]*3, [0.5]*3),
     ])
     
     # Initialize dataset and split into train/val
@@ -484,7 +474,6 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                 total_loss += step_output["loss"].item()
                 #print("total_loss debug:")
                 #print(total_loss)
-                global_step += 1
 
                 # Logging
                 if global_step % config["training"].get("log_steps", 10) == 0:
@@ -524,6 +513,8 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                         
                         CHARACTER_DATA_VOLUME.commit()
                         print("✅ Committed volume changes")
+
+                global_step += 1
 
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
