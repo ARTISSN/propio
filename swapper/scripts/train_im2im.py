@@ -114,7 +114,7 @@ def preencode_latents(pipe, tf, character_path, device="cuda"):
         print(f"Saved latents for {frame_id}")
 
 def save_training_preview(pipe, batch, output_dir, step, device, config):
-    pipe.eval()
+    pipe.unet.eval()
     with torch.no_grad():
         pixel_values = batch["pixel_values"][0:1].to(device)
         normal_map   = batch["normal_map"][0:1].to(device)
@@ -503,7 +503,7 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                     save_training_preview(pipe, batch, output_dir, global_step, accelerator.device, config)
 
                 # Save checkpoint
-                if global_step % config["training"].get("save_steps", 500) == 0:
+                if (global_step - 1) % config["training"].get("save_steps", 500) == 0:
                     if accelerator.is_main_process:
                         checkpoint_path = output_dir / "checkpoints" / f"checkpoint-{epoch}-{global_step}"
                         checkpoint_path.mkdir(parents=True, exist_ok=True)
