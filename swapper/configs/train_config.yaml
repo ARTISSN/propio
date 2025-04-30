@@ -14,12 +14,13 @@ training:
   resolution: 512 
   num_epochs: 200
   max_train_steps: 10000
-  batch_size: 2
+  batch_size: 1
   gradient_accumulation_steps: 1
   learning_rate: 0.00001
   warmup_ratio: 0.0001
   patience: 10
   save_steps: 500
+  preview_steps: 100
   log_steps: 10
   
 model:

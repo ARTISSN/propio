@@ -8,6 +8,7 @@ Uses paired mesh renders (input) and FLUX-generated portraits (target).
 """
 
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 import argparse
 from pathlib import Path
 import modal
@@ -64,15 +65,97 @@ class MeshFaceDataset(Dataset):
             "Render and face counts do not match after applying blacklist!"
         self.tf = transform
 
+        mesh_latent_dir = character_path / "processed" / "latents" / "mesh"
+        ref_latent_dir  = character_path / "processed" / "latents" / "ref"
+        self.frame_ids = sorted([p.stem for p in mesh_latent_dir.glob("*.pt") if (ref_latent_dir / f"{p.stem}.pt").exists()])
+        self.mesh_latent_dir = mesh_latent_dir
+        self.ref_latent_dir = ref_latent_dir
+
     def __len__(self):
         return len(self.renders)
 
     def __getitem__(self, idx):
         render_img = Image.open(self.renders[idx]).convert("RGB")
         face_img  = Image.open(self.faces[idx]).convert("RGB")
-        return self.tf(render_img), self.tf(face_img)
+        frame_id = self.frame_ids[idx]
+        mesh_latent = torch.load(self.mesh_latent_dir / f"{frame_id}.pt")
+        ref_latent  = torch.load(self.ref_latent_dir  / f"{frame_id}.pt")
+        return self.tf(render_img), self.tf(face_img), mesh_latent, ref_latent
 
 # ─── 3) HELPER FUNCTIONS ──────────────────────────────────────────────────────
+
+
+def preencode_latents(pipe, tf, character_path, device="cuda"):
+    vae = pipe.vae.eval()
+
+    # Find all pairs
+    renders = sorted((character_path / "processed" / "renders").glob("*.png"))
+    faces   = sorted((character_path / "processed" / "faces").glob("*.png"))
+
+    mesh_latent_dir = character_path / "processed" / "latents" / "mesh"
+    ref_latent_dir  = character_path / "processed" / "latents" / "ref"
+    mesh_latent_dir.mkdir(parents=True, exist_ok=True)
+    ref_latent_dir.mkdir(parents=True, exist_ok=True)
+
+    for r, f in zip(renders, faces):
+        frame_id = r.stem
+        mesh_img = tf(Image.open(r).convert("RGB")).to(device)
+        ref_img  = tf(Image.open(f).convert("RGB")).to(device)
+
+        print(mesh_img.shape)
+        print(ref_img.shape)
+
+        with torch.no_grad():
+            mesh_latent = (vae.encode(mesh_img.unsqueeze(0)).latent_dist.sample() * vae.config.scaling_factor).squeeze(0)
+            ref_latent  = (vae.encode(ref_img.unsqueeze(0)).latent_dist.sample() * vae.config.scaling_factor).squeeze(0)
+
+        torch.save(mesh_latent, mesh_latent_dir / f"{frame_id}.pt")
+        torch.save(ref_latent,  ref_latent_dir  / f"{frame_id}.pt")
+        print(f"Saved latents for {frame_id}")
+
+def save_training_preview(pipe, batch, output_dir, step, device, config):
+    pipe.eval()
+    with torch.no_grad():
+        pixel_values = batch["pixel_values"][0:1].to(device)
+        normal_map   = batch["normal_map"][0:1].to(device)
+        embedding    = batch["embedding"][0:1].to(device)
+        lighting     = batch["lighting"][0:1].to(device)
+        # Target image (ground truth)
+        target_img   = pixel_values[0].cpu()
+        # Run pipeline
+        output = pipe(
+            image=pixel_values,
+            normal_map=normal_map,
+            embedding=embedding,
+            lighting=lighting,
+            num_inference_steps=20,
+            guidance_scale=7.5,
+        ).images[0]  # PIL Image
+
+        # Convert tensors to PIL for side-by-side
+        def tensor_to_pil(t):
+            t = (t * 0.5 + 0.5).clamp(0, 1)  # unnormalize
+            t = (t * 255).byte().permute(1, 2, 0).cpu().numpy()
+            return Image.fromarray(t)
+
+        input_pil = tensor_to_pil(pixel_values[0])
+        target_pil = tensor_to_pil(target_img)
+        output_pil = output
+
+        # Concatenate horizontally
+        w, h = input_pil.width, input_pil.height
+        preview = Image.new("RGB", (w * 3, h))
+        preview.paste(input_pil, (0, 0))
+        preview.paste(target_pil, (w, 0))
+        preview.paste(output_pil, (w * 2, 0))
+
+        preview_dir = Path(output_dir) / "previews"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_path = preview_dir / f"preview_step_{step}.png"
+        preview.save(preview_path)
+        print(f"✅ Saved training preview to {preview_path}")
+    pipe.train()
+
 def training_step(
     pipe,
     batch,
@@ -103,16 +186,11 @@ def training_step(
     Returns:
         dict: Loss values and predictions
     """
-    mesh_imgs, ref_imgs = batch
-    mesh_imgs = mesh_imgs.to(device).float()    # -> torch.cuda.FloatTensor
-    ref_imgs  = ref_imgs.to(device).float()
-
-    sf = pipe.vae.config.scaling_factor
-    mesh_latents = pipe.vae.encode(mesh_imgs).latent_dist.sample() * sf
-    ref_latents  = pipe.vae.encode(ref_imgs).latent_dist.sample() * sf
-
-    mesh_latents = mesh_latents.half()          # -> torch.cuda.HalfTensor
-    ref_latents  = ref_latents.half()
+    mesh_imgs, ref_imgs, mesh_latents, ref_latents = batch
+    mesh_imgs = mesh_imgs.to(device)
+    ref_imgs = ref_imgs.to(device)
+    mesh_latents = mesh_latents.to(device)
+    ref_latents = ref_latents.to(device)
 
     # 3) sample noise & timesteps
     noise = torch.randn_like(ref_latents)
@@ -150,12 +228,20 @@ def training_step(
     add_neg_time_ids = add_neg_time_ids.repeat(mesh_latents.shape[0], 1).to(device)
 
     # 6) cast everything to half if your UNet is fp16
-    """mesh_latents     = mesh_latents.half()
-    noisy_ref        = noisy_ref.half()
-    seq_embeds       = seq_embeds.half()
-    pooled_embeds    = pooled_embeds.half()
-    add_time_ids     = add_time_ids.half()
-    add_neg_time_ids = add_neg_time_ids.half()"""
+    """mesh_latents     = mesh_latents.float()
+    noisy_ref        = noisy_ref.float()
+    seq_embeds       = seq_embeds.float()
+    pooled_embeds    = pooled_embeds.float()
+    add_time_ids     = add_time_ids.float()
+    add_neg_time_ids = add_neg_time_ids.float()"""
+
+    #print("dtype debug:")
+    #print(mesh_latents.dtype)
+    #print(noisy_ref.dtype)
+    #print(seq_embeds.dtype)
+    #print(pooled_embeds.dtype)
+    #print(add_time_ids.dtype)
+    #print(add_neg_time_ids.dtype)
 
     with torch.autograd.set_detect_anomaly(True):
         with accelerator.autocast():
@@ -173,9 +259,9 @@ def training_step(
             ).sample
 
             # 8) loss
-            loss = F.mse_loss(noise_pred.float(), noise.float())
-            print("loss debug:")
-            print(loss)
+            loss = F.mse_loss(noise_pred, noise)
+            #print("loss debug:")
+            #print(loss)
 
     if is_training:
         optimizer.zero_grad(set_to_none=True)
@@ -183,28 +269,32 @@ def training_step(
         #accelerator.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(pipe.unet.parameters(), max_norm=1.0)
         total_norm = torch.norm(
-            torch.stack([g.detach().float().norm() for g in pipe.unet.parameters() if g.grad is not None])
+            torch.stack([g.detach().norm() for g in pipe.unet.parameters() if g.grad is not None])
         )
-        print("Gradient norm:", total_norm.item())  
+        #print("Gradient norm:", total_norm.item())  
         optimizer.step()
         lr_scheduler.step()
-        for n, p in pipe.unet.named_parameters():
-            if "lora_" in n:
-                print(f"{n}: mean={p.data.mean():.3e}, std={p.data.std():.3e}")
+        #for n, p in pipe.unet.named_parameters():
+        #    if "lora_" in n:
+        #        print(f"{n}: mean={p.data.mean():.3e}, std={p.data.std():.3e}")
 
         #scaler.update()
         optimizer.zero_grad()
         if accelerator.sync_gradients and unet_ema is not None:
             unet_ema.step(pipe.unet.parameters())
+    else:
+        total_norm = None
 
-    raise Exception("Stop here")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return {
         "loss": loss,
         "noise_pred": noise_pred,
         "noise": noise,
         "mesh_latents": mesh_latents,
-        "ref_latents": ref_latents
+        "ref_latents": ref_latents,
+        "total_norm": total_norm
     }
 
 # ─── 4) TRAINING LOOP ──────────────────────────────────────────────────────────
@@ -261,11 +351,13 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
         sdxl_cache_path,
         torch_dtype=torch.float32,
     ).to(device)
-    pipe.unet = pipe.unet.half()
+    #pipe.unet = torch.compile(pipe.unet)
+    #pipe.unet = pipe.unet.half()
     
     pipe.enable_attention_slicing()
     pipe.enable_vae_slicing()
     pipe.unet.enable_gradient_checkpointing()
+    #pipe.enable_xformers_memory_efficient_attention()   # if you have xformers installed
 
     # Prepare U-Net for LoRA training
     lora_cfg = LoraConfig(
@@ -281,7 +373,7 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
         bias="none",
     )
     pipe.unet = get_peft_model(pipe.unet, lora_cfg)
-    pipe.unet = pipe.unet.to(device, dtype=torch.float16)
+    pipe.unet = pipe.unet.to(device)
 
 
     num_added = pipe.tokenizer.add_special_tokens({"additional_special_tokens":["<rrrdaniel>"]})
@@ -297,6 +389,7 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
     ])
     
     # Initialize dataset and split into train/val
+    preencode_latents(pipe, transform, character_path, device)
     dataset = MeshFaceDataset(character_path, transform)
     val_size = int(len(dataset) * 0.2)  # 20% for validation
     train_size = len(dataset) - val_size
@@ -351,13 +444,13 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
     train_loader.dataset.dataset.tf = T.Compose([
         T.ToTensor(),
         T.Normalize([0.5]*3, [0.5]*3),
-        T.ConvertImageDtype(torch.float16)
+        T.ConvertImageDtype(torch.float32)
     ])
     
     val_loader.dataset.dataset.tf = T.Compose([
         T.ToTensor(),
         T.Normalize([0.5]*3, [0.5]*3),
-        T.ConvertImageDtype(torch.float16)
+        T.ConvertImageDtype(torch.float32)
     ])
 
     # Training loop
@@ -389,8 +482,8 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                     raise e
                 
                 total_loss += step_output["loss"].item()
-                print("total_loss debug:")
-                print(total_loss)
+                #print("total_loss debug:")
+                #print(total_loss)
                 global_step += 1
 
                 # Logging
@@ -400,9 +493,14 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                         f"Epoch: {epoch}/{config['training']['num_epochs']} | "
                         f"Step: {global_step}/{num_training_steps} | "
                         f"Learning Rate: {optimizer.param_groups[0]['lr']:.6f}\n"
+                        f"Gradient Norm: {step_output['total_norm']:.4f}\n"
                         f"Losses:\n"
                         f"- Total: {step_output['loss']:.4f}\n"
                     )
+
+                # Save training preview
+                if global_step % config["training"].get("preview_steps", 100) == 0:
+                    save_training_preview(pipe, batch, output_dir, global_step, accelerator.device, config)
 
                 # Save checkpoint
                 if global_step % config["training"].get("save_steps", 500) == 0:
@@ -427,6 +525,9 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                         CHARACTER_DATA_VOLUME.commit()
                         print("✅ Committed volume changes")
 
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
         # Validation
         pipe.unet.eval()
         total_val_loss = 0.0
@@ -443,6 +544,10 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                     batch=batch,
                     noise_scheduler=noise_scheduler,
                     device=device,
+                    accelerator=accelerator,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    unet_ema=unet_ema,
                     is_training=False,
                     config=config
                 )
@@ -486,6 +591,9 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
             if patience_counter >= patience:
                 print("Early stopping triggered")
                 break
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # Save final model
     if accelerator.is_main_process:
