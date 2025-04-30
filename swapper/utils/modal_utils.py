@@ -8,8 +8,14 @@ import shutil
 import json
 from typing import Optional, Dict
 import datetime
+from train_im2im import train_lora, setup_args
 
-MODAL_GPU = "A100"  # More VRAM than A10G
+stub = modal.Stub("character-pipeline")  
+@stub.function(
+    gpu="A100",            # or "A100" or whatever instance you want
+    timeout=60*60*2,        # 2 hours timeout (adjust as needed)
+    retries=3
+)
 
 # Create app for Modal
 app = modal.App("face-swap-training")
@@ -24,6 +30,27 @@ CHARACTER_DATA_VOLUME = modal.Volume.from_name("character-data", create_if_missi
 CACHE_VOLUME = modal.Volume.from_name("model-cache", create_if_missing=True)  # Single volume for all caches
 
 REQUIREMENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "modal_requirements.txt")
+
+def run_modal_train_im2im(character_name: str):
+    """Run the train_im2im training on Modal."""
+    print(f"Starting train_im2im for character: {character_name}")
+
+    # Define data paths based on character name
+    base_path = Path("/root/data/characters") / character_name / "processed/maps"
+    mesh_dir = base_path / "renders"
+    ref_dir  = base_path / "refs"
+
+    output_dir = Path("/root/data/characters") / character_name / "models/im2im_lora"
+
+    # Set up training arguments
+    args = setup_args(
+        mesh_dir=mesh_dir,
+        ref_dir=ref_dir,
+        out_dir=output_dir,
+    )
+
+    # Actually start training
+    train_lora(args)
 
 def verify_local_data(character_name: str):
     """Verify character data exists locally before starting Modal"""
@@ -227,7 +254,7 @@ def get_training_dir_name(training_name: Optional[str] = None) -> str:
 
 @app.function(
     image=image,
-    gpu=MODAL_GPU,
+    gpu=gpu,
     timeout=86400,
     volumes={
         DATA_MOUNT: CHARACTER_DATA_VOLUME,
