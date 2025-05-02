@@ -209,20 +209,14 @@ class CharacterPipeline:
                     continue
                 
                 # Process lighting coefficients
-                lighting_data = lighting_processor.process_frame(
-                    base_name,
-                    Path(map_data['face_path']),
-                    Path(map_data['normal_path'])
-                )
+                lighting_data = lighting_processor.process_frame(base_name, maps_dir)
                 
                 if not lighting_data:
                     print(f"Failed to calculate lighting for frame {base_name}")
                     continue
                 
                 # Calculate and store top suns
-                coeffs = lighting_data["lighting_coefficients"]
-                suns = compute_top_suns(coeffs, K=3)
-                self.metadata["frames"][base_name].setdefault("lighting", {})["suns"] = suns
+                suns = lighting_data["suns"] #compute_top_suns(coeffs, K=3)
                 
                 # Update metadata
                 if base_name not in self.metadata["frames"]:
@@ -239,7 +233,7 @@ class CharacterPipeline:
                         "generated_at": timestamp
                     },
                     "lighting": {
-                        "coefficients": lighting_data["lighting_coefficients"],
+                        #"coefficients": lighting_data["lighting_coefficients"],
                         "suns": suns,
                         "generated_at": timestamp
                     },

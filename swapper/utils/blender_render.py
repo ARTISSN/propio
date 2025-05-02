@@ -3,157 +3,83 @@ import bmesh
 import mathutils
 import math
 import json
-from pathlib import Path
+import cv2
 import numpy as np
+from pathlib import Path
 
 FACE_MESH_INDICES = None
 
+# --- Scene setup ---
 def setup_scene(ambient_color=None):
-    """Clear existing scene and set up basic environment."""
-    # Clear existing objects
+    """Clear scene and set basic world background."""
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
-    
-    # Set world background to a dim color for global illumination
     world = bpy.data.worlds["World"]
-    bg = world.node_tree.nodes["Background"]
-    if ambient_color is not None:
-        bg.inputs[0].default_value = (*ambient_color, 1)
-    else:
-        bg.inputs[0].default_value = (0.15, 0.18, 0.22, 1)
-    bg.inputs[1].default_value = 1.0  # Strength, increase for more ambient light
+    bg = world.node_tree.nodes.get("Background")
+    if bg:
+        if ambient_color is not None:
+            bg.inputs[0].default_value = (*ambient_color, 1)
+        else:
+            bg.inputs[0].default_value = (0.15, 0.18, 0.22, 1)
+        bg.inputs[1].default_value = 1.0
 
-def transform_imported_mesh(obj, image_size=(512, 512)):
-    """Apply necessary transformations to match mesh_utils_r.py coordinate system and center mesh."""
-    global FACE_MESH_INDICES
+# --- Mesh import/transforms ---
+def transform_imported_mesh(obj):
     mesh = obj.data
-    
-    # Create transformation matrix
-    # 1. First rotate 180° about Z (negate X and Y)
-    # 2. Then rotate 180° about Y (negate X and Z)
-    #rot_matrix = mathutils.Matrix.Rotation(math.radians(180), 4, 'Z')
-    trans_matrix = mathutils.Matrix.Translation(mathutils.Vector((0.5, 0.5, 0)))
-    # Set origin to geometry center
-    #bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='MEDIAN')
-    # Set origin to center of mass
-    #bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='MEDIAN')
-    
-    # Move object to origin
-    #obj.location = (0.0, 0.0, 0.0)
-    
-    # Ensure we're in OBJECT mode
-    if bpy.context.mode != 'OBJECT':
-        bpy.ops.object.mode_set(mode='OBJECT')
-    
-    # Make this object active
-    bpy.context.view_layer.objects.active = obj
-    
-    # Create rotation matrix for Z-axis rotation
-    rot_matrix = mathutils.Matrix.Rotation(math.radians(180), 4, 'Z')
-
-    #rot_matrix = mathutils.Matrix.Rotation(math.radians(180), 4, 'Y')
-    # Apply transformations to vertices
-    for vertex in mesh.vertices:
-        # Apply rotation
-        vertex.co = rot_matrix @ vertex.co
-        vertex.co = trans_matrix @ vertex.co
-        vertex.co.x = -vertex.co.x
-
+    # Apply rotations to match coordinate system
+    rot_z = mathutils.Matrix.Rotation(math.radians(180), 4, 'Z')
+    trans = mathutils.Matrix.Translation(mathutils.Vector((0.5,0.5,0)))
+    for v in mesh.vertices:
+        v.co = trans @ (rot_z @ v.co)
+        v.co.x = -v.co.x
     mesh.update()
     return obj
 
+
 def import_and_process_mesh(obj_path):
-    """Import OBJ file and process it for iris separation."""
-    # Import the OBJ file
-    bpy.ops.wm.obj_import(filepath=obj_path)
-    bpy.ops.object.modifier_add(type='SUBSURF')
-    bpy.context.object.modifiers["Subdivision"].levels = 2
-    
-    # Save current selected object as "face"
-    face = bpy.context.object
-    
-    # Apply transformations to match mesh_utils_r coordinate system
-    face = transform_imported_mesh(face)
-    
-    # Duplicate the face object
+    bpy.ops.wm.obj_import(filepath=str(obj_path))
+    obj = bpy.context.object
+    obj.modifiers.new(name='Subsurf', type='SUBSURF').levels = 2
+    face = transform_imported_mesh(obj)
     face_dup = face.copy()
     face_dup.data = face.data.copy()
-    face_dup.name = "face_dup"
+    face_dup.name = 'face_dup'
     bpy.context.collection.objects.link(face_dup)
-    
     return face, face_dup
 
+# --- Iris processing (unchanged) ---
 def process_irises(face_dup):
-    """Process the iris geometry."""
     bpy.context.view_layer.objects.active = face_dup
-    if bpy.context.mode != 'OBJECT':
-        bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.mode_set(mode='EDIT')
-    
     bm = bmesh.from_edit_mesh(face_dup.data)
-    bm.faces.ensure_lookup_table()
-    bm.verts.ensure_lookup_table()
-    
-    # First deselect everything
-    for v in bm.verts:
-        v.select = False
-    for f in bm.faces:
-        f.select = False
-    
-    # Find and select iris faces
-    iris_faces = [f for f in bm.faces if all(v.index in range(468, 478) for v in f.verts)]
+    bm.faces.ensure_lookup_table(); bm.verts.ensure_lookup_table()
+    for v in bm.verts: v.select=False
+    for f in bm.faces: f.select=False
+    iris_faces = [f for f in bm.faces if all(v.index in range(468,478) for v in f.verts)]
     for f in iris_faces:
-        f.select = True
-        # Also select the face's vertices and edges for proper extrusion
-        for v in f.verts:
-            v.select = True
-        for e in f.edges:
-            e.select = True
-    
-    # Extrude the faces
+        f.select=True
+        for v in f.verts: v.select=True
+        for e in f.edges: e.select=True
     ret = bmesh.ops.extrude_face_region(bm, geom=iris_faces)
-    
-    # Get the new vertices
     extruded_verts = [e for e in ret['geom'] if isinstance(e, bmesh.types.BMVert)]
-    
-    # Compute average normal for iris faces (or use a fixed direction)
-    avg_normal = mathutils.Vector((0, 0, 0))
+    avg_n = mathutils.Vector((0,0,0))
+    for f in iris_faces: avg_n += f.normal
+    avg_n.normalize()
+    bmesh.ops.translate(bm, verts=extruded_verts, vec=avg_n * -0.02)
     for f in iris_faces:
-        print(f.normal)
-        avg_normal += f.normal
-    avg_normal.normalize()
-    print(avg_normal)
-    
-    # Move the new vertices along the normal (e.g., 2mm out)
-    prism_depth = -0.02  # Adjust as needed
-    bmesh.ops.translate(bm, verts=extruded_verts, vec=avg_normal * prism_depth)
-
-    # Select all iris faces and new geometry
-    for f in iris_faces:
-        f.select = True
-        for v in f.verts:
-            v.select = True
-        for e in f.edges:
-            e.select = True
-    
-    # Also select all extruded vertices and their connected faces
+        f.select=True
+        for v in f.verts: v.select=True
+        for e in f.edges: e.select=True
     for v in extruded_verts:
-        v.select = True
+        v.select=True
         for f in v.link_faces:
-            f.select = True
-            for e in f.edges:
-                e.select = True
-    
-    # Update the mesh
+            f.select=True
+            for e in f.edges: e.select=True
     bmesh.update_edit_mesh(face_dup.data)
-    
-    # Separate irises
-    before_objects = set(bpy.data.objects)
     bpy.ops.mesh.separate(type='SELECTED')
     bpy.ops.object.mode_set(mode='OBJECT')
-    after_objects = set(bpy.data.objects)
-    
-    irises = list(after_objects - before_objects)[0]
+    objs = set(bpy.data.objects)
+    irises = list(objs - {face_dup})[0]
     return irises
 
 def create_material(name, properties):
@@ -420,165 +346,86 @@ def setup_materials(obj, irises, character_dir, frame_name):
     return face_color
 
 def setup_camera_and_lighting(cam_pos, cam_dir, suns=None, ambient_color=None):
-    """Set up camera and lighting in the scene, including global illumination."""
-    # Camera setup
+    """Add camera and sun lamps based on SH suns list."""
+    # Camera
     bpy.ops.object.camera_add(location=cam_pos)
-    camera = bpy.context.active_object
-
-    cam_dir = mathutils.Vector(cam_dir).normalized()
-    forward = mathutils.Vector((0.0, 0.0, -1.0))
-    rotation = forward.rotation_difference(cam_dir)
-
-    camera.rotation_mode = 'QUATERNION'
-    camera.rotation_quaternion = rotation
-    bpy.context.scene.camera = camera
-
-    # Make camera orthographic
-    camera.data.type = 'ORTHO'
-    camera.data.ortho_scale = 1.0
-
-    # Remove any existing sun lamps
-    for obj in bpy.data.objects:
-        if obj.type == 'LIGHT' and obj.data.type == 'SUN':
-            bpy.data.objects.remove(obj, do_unlink=True)
-
-    # Add a sun lamp for each sun direction
-    if suns is not None:
-        for i, sun in enumerate(suns):
-            # Apply OBJ import axis swap and mesh Y flip
-            direction = sun["direction"]
-            intensity = 1#sun["intensity"]
-            sun_vec = mathutils.Vector((
-                -direction[0],    # x
-                -direction[2],    # y
-                -direction[1]     # z
-            )).normalized()
-            bpy.ops.object.light_add(type='SUN', location=(0, 0, 0))
-            light = bpy.context.active_object
-            light.data.energy = intensity  # You may want to scale/normalize this
-            rot_quat = mathutils.Vector((0, 0, -1)).rotation_difference(sun_vec)
-            light.rotation_mode = 'QUATERNION'
-            light.rotation_quaternion = rot_quat
-            bpy.ops.object.light_add(type='SUN', location=(0, 0, 0))
-            light = bpy.context.active_object
-            light.data.energy = 0.3*intensity  # You may want to scale/normalize this
-            sun_vec = mathutils.Vector((
-                direction[0],    # x
-                direction[2],    # y
-                -direction[1]    # z
-            )).normalized()
-            rot_quat = mathutils.Vector((0, 0, -1)).rotation_difference(sun_vec)
-            light.rotation_mode = 'QUATERNION'
-            light.rotation_quaternion = rot_quat
+    cam = bpy.context.object
+    forward = mathutils.Vector((0,0,-1))
+    rot = forward.rotation_difference(mathutils.Vector(cam_dir).normalized())
+    cam.rotation_mode = 'QUATERNION'
+    cam.rotation_quaternion = rot
+    bpy.context.scene.camera = cam
+    cam.data.type = 'ORTHO'; cam.data.ortho_scale=1.0
+    # Remove existing suns
+    for obj in list(bpy.data.objects):
+        if obj.type=='LIGHT' and obj.data.type=='SUN': bpy.data.objects.remove(obj, do_unlink=True)
+    # Add new suns
+    ENERGY_SCALE = 1e-0
+    if suns:
+        for i, sun in enumerate(suns, start=1):
+            print(sun)
+            dir = sun['direction']; col = sun['color']; inten = sun['intensity']
+            sun_vec = mathutils.Vector((dir[0], dir[1], -dir[2])).normalized()
+            bpy.ops.object.light_add(type='SUN', location=(0,0,0))
+            light = bpy.context.object; light.name=f'SH_Sun_{i}'
+            rot_q = mathutils.Vector((0,0,-1)).rotation_difference(sun_vec)
+            light.rotation_mode='QUATERNION'; light.rotation_quaternion=rot_q
+            # Color & energy
+            light.data.color = col
+            light.data.energy = inten * ENERGY_SCALE
+            # Softness not needed for pure SH approx
     else:
-        # Default sun direction
-        bpy.ops.object.light_add(type='SUN', location=(0, 0, 0))
-        light = bpy.context.active_object
-        light.data.energy = 1
-        light.rotation_euler = (math.radians(-90), 0, math.radians(180))
+        bpy.ops.object.light_add(type='SUN', location=(0,0,0))
+        obj = bpy.context.object; obj.data.energy=1; obj.rotation_euler=(math.radians(-90),0,math.radians(180))
+    # World ambient
+    world = bpy.data.worlds['World']; bg = world.node_tree.nodes.get('Background')
+    if bg:
+        if ambient_color: bg.inputs[0].default_value=(*ambient_color,1)
+        bg.inputs[1].default_value=0.8
 
-    # Set world background for global illumination
-    world = bpy.data.worlds["World"]
-    bg = world.node_tree.nodes["Background"]
-    if ambient_color is not None:
-        bg.inputs[0].default_value = (*ambient_color, 1)
-    else:
-        bg.inputs[0].default_value = (0.15, 0.18, 0.22, 1)
-    bg.inputs[1].default_value = 0.8
-
+# --- Rendering ---
 def render_scene(output_path, resolution=512):
-    """Configure render settings and render the scene."""
-    bpy.context.scene.render.resolution_x = resolution
-    bpy.context.scene.render.resolution_y = resolution
-    bpy.context.scene.render.image_settings.file_format = 'PNG'
-    bpy.context.scene.render.filepath = output_path
-    
-    # Enable material preview quality
-    bpy.context.scene.render.engine = 'BLENDER_EEVEE_NEXT'  # Or 'EEVEE' for faster renders
-    bpy.context.scene.render.use_high_quality_normals = True
-    
-    # If using Cycles
-    bpy.context.scene.cycles.samples = 128  # Adjust based on quality needs
-    bpy.context.scene.cycles.use_denoising = True
-    
+    scn = bpy.context.scene; scn.render.resolution_x=scn.render.resolution_y=resolution
+    scn.render.image_settings.file_format='PNG'; scn.render.filepath=str(output_path)
+    scn.render.engine='BLENDER_EEVEE_NEXT'; scn.render.use_high_quality_normals=True
+    scn.cycles.samples=128; scn.cycles.use_denoising=True
     bpy.ops.render.render(write_still=True)
 
+# --- Main processing ---
 def process_character(character_dir, frame_name=None):
-    """Process a character's data and render the result."""
     global FACE_MESH_INDICES
     character_dir = Path(character_dir)
-    metadata_path = character_dir / "metadata.json"
-    
-    with open(metadata_path, 'r') as f:
-        metadata = json.load(f)
-    
-    # If no specific frame is provided, process all frames
-    frames_to_process = [frame_name] if frame_name else metadata["frames"].keys()
-    
-    for frame in frames_to_process:
-        if frame not in metadata["frames"]:
-            print(f"Frame {frame} not found in metadata")
-            continue
-            
-        frame_data = metadata["frames"][frame]
-        processed_dir = character_dir / "processed"
-        obj_path = processed_dir / "meshes" / f"{frame}.obj"
-        output_path = processed_dir / "renders" / f"{frame}.png"
-        output_path.parent.mkdir(exist_ok=True)
-        
-        if not obj_path.exists():
-            print(f"OBJ file not found: {obj_path}")
-            continue
+    meta = json.loads((character_dir/'metadata.json').read_text())
+    frames = [frame_name] if frame_name else list(meta['frames'].keys())
+    for frame in frames:
+        data = meta['frames'].get(frame)
+        if not data: continue
+        dirs = character_dir/'processed'
+        obj_path = dirs/'meshes'/f'{frame}.obj'
+        out_path=dirs/'renders'/f'{frame}.png'; out_path.parent.mkdir(exist_ok=True)
+        if not obj_path.exists(): continue
 
         # Read face mesh indices for this frame
-        face_mesh_indices = frame_data.get("face_mesh_indices", None)
+        face_mesh_indices = data.get("face_mesh_indices", None)
         if face_mesh_indices is None:
             print(f"Warning: No face_mesh_indices found for frame {frame}")
             continue
         FACE_MESH_INDICES = face_mesh_indices
-
-        # Default camera position and direction if not specified in metadata
-        cam_pos = (0, -1, 0)
-        cam_dir = (0, 1, 0)
         
-        suns = None
-        lighting = frame_data.get("lighting", {})
-        if "suns" in lighting:
-            suns = lighting["suns"]
-        
-        # Setup and render
+        # Get lighting data from metadata
+        lighting_data = data.get('lighting', {})
+        suns = lighting_data.get('suns', [])
+        # import mesh, materials, etc.
         setup_scene()
-        face, face_dup = import_and_process_mesh(str(obj_path))
+        face, face_dup = import_and_process_mesh(obj_path)
         irises = process_irises(face_dup)
         face_color = setup_materials(face_dup, irises, character_dir, frame)
-        setup_camera_and_lighting(cam_pos, cam_dir, suns=suns, ambient_color=face_color)
-        render_scene(str(output_path))
-        
-        print(f"Rendered {frame} to {output_path}")
+        setup_camera_and_lighting((0,-1,0),(0,1,0), suns=suns, ambient_color=face_color)
+        render_scene(out_path)
+        print(f"Rendered {frame} -> {out_path}")
 
-if __name__ == "__main__":
+if __name__=='__main__':
     import sys
-    from pathlib import Path
-    
-    if len(sys.argv) < 2:
-        print("Usage: blender --background --python blender_render.py -- <character_dir> [frame_name]")
-        sys.exit(1)
-    
-    # The last argument after -- will be either the character_dir or frame_name
-    last_arg = sys.argv[-1]
-    second_last_arg = sys.argv[-2] if len(sys.argv) > 2 else None
-    
-    # Check if the last argument looks like a path
-    if Path(last_arg).suffix == '' and not Path(last_arg).is_dir():
-        # Last arg is not a path, so it must be a frame name
-        character_dir = second_last_arg
-        frame_name = last_arg
-    else:
-        # Last arg is a path, so it's the character directory
-        character_dir = last_arg
-        frame_name = None
-    
-    print(f"Character directory: {character_dir}")
-    print(f"Frame name: {frame_name}")
-    
-    process_character(character_dir, frame_name)
+    args = sys.argv[sys.argv.index('--')+1:]
+    char_dir = args[0]; frame = args[1] if len(args)>1 else None
+    process_character(char_dir, frame)

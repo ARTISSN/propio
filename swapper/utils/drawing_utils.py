@@ -439,6 +439,7 @@ def create_blended_normal_map(
     mesh_weight = np.mean(np.abs(image_normal_map - 127.5), axis=2) / 127.5
     mesh_weight = np.clip(mesh_weight * 2, 0, 1)  # Amplify the weight
     mesh_weight = np.stack([mesh_weight] * 3, axis=2)
+    mesh_weight = np.zeros_like(mesh_weight)
     
     # Blend the normal maps (now they have the same dimensions)
     

@@ -28,6 +28,7 @@ from accelerate import Accelerator
 import datetime
 from diffusers.training_utils import EMAModel
 from transformers import get_cosine_schedule_with_warmup
+import lpips
 
 # ─── 1) CONFIGURATION ─────────────────────────────────────────────────────────
 
@@ -84,6 +85,14 @@ class MeshFaceDataset(Dataset):
 
 # ─── 3) HELPER FUNCTIONS ──────────────────────────────────────────────────────
 
+def get_image_transform(resolution, dtype=torch.float32):
+    return T.Compose([
+        T.Resize((resolution, resolution)),
+        T.ToTensor(),
+        T.Normalize([0.5]*3, [0.5]*3),
+        T.Lambda(lambda x: x * 0.5 + 0.5),
+        T.ConvertImageDtype(dtype)
+    ])
 
 def preencode_latents(pipe, tf, character_path, device="cuda"):
     vae = pipe.vae.eval()
@@ -156,7 +165,8 @@ def training_step(
     lr_scheduler=None,
     unet_ema=None,
     is_training=True,
-    config=None
+    config=None,
+    lpips_loss_fn=None,
 ):
     """
     Performs a single training/validation step.
@@ -172,6 +182,7 @@ def training_step(
         unet_ema: EMA model (only needed for training)
         is_training: Whether this is a training step
         config: Training configuration
+        lpips_loss_fn: LPIPS loss function (only needed for training)
     
     Returns:
         dict: Loss values and predictions
@@ -249,9 +260,23 @@ def training_step(
             ).sample
 
             # 8) loss
-            loss = F.mse_loss(noise_pred, noise)
-            #print("loss debug:")
-            #print(loss)
+            mse_loss = F.mse_loss(noise_pred, noise)
+
+            # --- LPIPS loss ---
+            # Decode latents to images for LPIPS
+            with torch.no_grad():
+                # [B, C, H, W] in [-1, 1] for LPIPS
+                decoded_pred = pipe.vae.decode(noise_pred).sample
+                decoded_target = pipe.vae.decode(noise).sample
+
+            # Clamp and scale to [-1, 1] for LPIPS
+            decoded_pred = (decoded_pred / 2).clamp(-1, 1)
+            decoded_target = (decoded_target / 2).clamp(-1, 1)
+
+            lpips_loss = lpips_loss_fn(decoded_pred, decoded_target).mean()
+
+            # Weighted total loss
+            loss = 0.7 * mse_loss + 0.3 * lpips_loss
 
     if is_training:
         optimizer.zero_grad(set_to_none=True)
@@ -280,6 +305,8 @@ def training_step(
 
     return {
         "loss": loss,
+        "mse_loss": mse_loss,
+        "lpips_loss": lpips_loss,
         "noise_pred": noise_pred,
         "noise": noise,
         "mesh_latents": mesh_latents,
@@ -372,11 +399,7 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
         pipe.text_encoder_2.resize_token_embeddings(len(pipe.tokenizer))
 
     # Build DataLoader
-    transform = T.Compose([
-        T.Resize((config["resolution"], config["resolution"])),
-        T.ToTensor(),
-        #T.Normalize([0.5]*3, [0.5]*3),
-    ])
+    transform = get_image_transform(config["resolution"])
     
     # Initialize dataset and split into train/val
     preencode_latents(pipe, transform, character_path, device)
@@ -395,6 +418,10 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
         batch_size=config["training"]["batch_size"],
         shuffle=False
     )
+
+    # Set the transform for both train and val loaders
+    train_loader.dataset.dataset.tf = transform
+    val_loader.dataset.dataset.tf = transform
 
     # Initialize optimizer
     optimizer = torch.optim.AdamW(
@@ -430,18 +457,9 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
         pipe.unet, optimizer, train_loader, val_loader, lr_scheduler
     )
     
-    # Convert data loaders to fp16
-    train_loader.dataset.dataset.tf = T.Compose([
-        T.ToTensor(),
-        T.Normalize([0.5]*3, [0.5]*3),
-        T.ConvertImageDtype(torch.float32)
-    ])
-    
-    val_loader.dataset.dataset.tf = T.Compose([
-        T.ToTensor(),
-        T.Normalize([0.5]*3, [0.5]*3),
-        T.ConvertImageDtype(torch.float32)
-    ])
+    # Initialize LPIPS loss function
+    lpips_loss_fn = lpips.LPIPS(net='vgg').to(device)
+    lpips_loss_fn.eval()
 
     # Training loop
     best_loss = float('inf')
@@ -465,7 +483,8 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                         lr_scheduler=lr_scheduler,
                         unet_ema=unet_ema,
                         is_training=True,
-                        config=config
+                        config=config,
+                        lpips_loss_fn=lpips_loss_fn
                     )
                 except Exception as e:
                     print(f"Error in training step: {e}")
@@ -485,6 +504,8 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                         f"Gradient Norm: {step_output['total_norm']:.4f}\n"
                         f"Losses:\n"
                         f"- Total: {step_output['loss']:.4f}\n"
+                        f"- MSE:   {step_output['mse_loss']:.4f}\n"
+                        f"- LPIPS: {step_output['lpips_loss']:.4f}\n"
                     )
 
                 # Save training preview
@@ -541,7 +562,8 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                     lr_scheduler=lr_scheduler,
                     unet_ema=unet_ema,
                     is_training=False,
-                    config=config
+                    config=config,
+                    lpips_loss_fn=lpips_loss_fn
                 )
                 total_val_loss += step_output["loss"].item()
 
