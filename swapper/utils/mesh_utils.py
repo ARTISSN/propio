@@ -222,6 +222,7 @@ def generate_normal_maps(mesh_data, processed_dir):
     base_name = Path(mesh_data['obj_path']).stem
     face_output_path = os.path.join(processed_dir, "faces", f"{base_name}.png")
     normal_output_path = os.path.join(processed_dir, "normals", f"{base_name}.png")
+    albedo_output_path = os.path.join(processed_dir, "albedos", f"{base_name}.png")
     ao_output_path = os.path.join(processed_dir, "ao", f"{base_name}_ao.png")
     
     # Draw landmarks and generate normal map
@@ -235,7 +236,7 @@ def generate_normal_maps(mesh_data, processed_dir):
         return None
     
     # Generate the maps
-    normal_map, face_image, mask, ao_map = mp_drawing.create_blended_normal_map(
+    normal_map, face_image, albedo_map = mp_drawing.create_blended_normal_map(
         image=annotated_image,
         landmark_list=mesh_data['landmarks'],
         vertices=vertices,
@@ -248,7 +249,7 @@ def generate_normal_maps(mesh_data, processed_dir):
     # Save the maps directly
     cv2.imwrite(face_output_path, face_image)
     cv2.imwrite(normal_output_path, normal_map)
-
+    cv2.imwrite(albedo_output_path, albedo_map)
     # Uncomment for AO maps
     #if ao_map is not None:
     #    cv2.imwrite(ao_output_path, ao_map)
@@ -256,8 +257,7 @@ def generate_normal_maps(mesh_data, processed_dir):
     return {
         'face_path': face_output_path,
         'normal_path': normal_output_path,
-        'ao_path': ao_output_path if ao_map is not None else None,
-        'mask': mask  # Return the mask in case it's needed later
+        'albedo_path': albedo_output_path,
     }
 
 def extract_number(path):

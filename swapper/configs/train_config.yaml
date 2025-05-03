@@ -16,8 +16,8 @@ training:
   max_train_steps: 10000
   batch_size: 2
   gradient_accumulation_steps: 4
-  learning_rate: 0.001
-  warmup_ratio: 0.0001
+  learning_rate: 0.0001
+  warmup_ratio: 0.001
   patience: 25
   save_steps: 500
   preview_steps: 50

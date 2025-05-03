@@ -50,8 +50,9 @@ class MeshFaceDataset(Dataset):
             blacklist = set()
 
         # Gather all renders and faces, filter by blacklist
-        all_renders = sorted((character_path / "processed" / "renders").glob("*.png"))
+        all_renders = sorted((character_path / "processed" / "maps" / "lighting").glob("*.png"))
         all_faces = sorted((character_path / "processed" / "faces").glob("*.png"))
+        print(f"Found {len(all_renders)} renders and {len(all_faces)} faces")
 
         # Only keep pairs where the stem is not in the blacklist
         self.renders = []
@@ -133,7 +134,7 @@ def save_training_preview(pipe, batch, output_dir, step, device, config):
 
         # Convert tensors to PIL for side-by-side
         def tensor_to_pil(t):
-            t = (t * 0.5 + 0.5).clamp(0, 1)
+            t = t.clamp(0, 1)
             t = (t * 255).byte().permute(1, 2, 0).cpu().numpy()
             return Image.fromarray(t)
 

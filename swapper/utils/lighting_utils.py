@@ -25,21 +25,32 @@ def compute_spherical_harmonics_basis(normals, order=3):
     return basis
 
 # Render SH-lit normal map in color
-def render_sh_lit_image(normal_map, coeffs, order=3):
+def render_sh_lit_image(normal_map, coeffs, order=3, albedo_map=None):
     """
     normal_map: HxWx3 RGB in [-1,1]
     coeffs:    (C,3) array of SH coefficients for R,G,B (C=(order+1)^2)
+    albedo_map: HxWx3 albedo map in [0,1]
     returns:   HxWx3 uint8 BGR image of lit normals
     """
     H, W, _ = normal_map.shape
     normals = normal_map.reshape(-1,3)
-    basis = compute_spherical_harmonics_basis(normals, order)
-    # compute color per channel
-    lit_rgb = basis.dot(coeffs)                # (M,3)
-    # clamp to [0,1]
+    basis  = compute_spherical_harmonics_basis(normals, order)
+    # compute raw lit color per channel
+    lit_rgb = basis.dot(coeffs)                      # shape (M,3)
+    # apply albedo map
+    if albedo_map is None:
+        tint = np.ones((H, W, 3), dtype=np.float32)  # white albedo
+    else:
+        if albedo_map.dtype == np.uint8:
+            # Convert BGR (OpenCV) to RGB for correct color multiplication
+            albedo_map = cv2.cvtColor(albedo_map, cv2.COLOR_BGR2RGB)
+            albedo_map = albedo_map.astype(np.float32) * 2.0 / 255.0
+        tint = albedo_map.reshape(-1, 3)
+    lit_rgb *= tint                                   # elementwise multiply
+    # clamp and reshape
     lit_rgb = np.clip(lit_rgb, 0.0, 1.0)
     lit_img = lit_rgb.reshape(H, W, 3)
-    # convert RGB to BGR uint8
+    # convert to uint8 BGR
     lit_bgr = (lit_img[..., ::-1] * 255).astype(np.uint8)
     return lit_bgr
 
@@ -82,7 +93,7 @@ def sh_coeffs_to_suns(coeffs, order=3, K=5, sample_count=5000):
     return suns
 
 # Main: calculate coefficients, save lit image, return per-channel coeffs
-def calculate_lighting_coefficients(face_img, normal_map, order=3, save_path=None):
+def calculate_lighting_coefficients(face_img, normal_map, albedo_map, order=3, save_path=None):
     """
     Fits 3-channel SH coefficients to normal_map + face_img.
     Optionally saves a preview of the normal map lit by the SH fit.
@@ -119,10 +130,14 @@ def calculate_lighting_coefficients(face_img, normal_map, order=3, save_path=Non
 
     # save lit preview if requested
     if save_path is not None:
-        lit_bgr = render_sh_lit_image(nm, coeffs, order)
-        outp = Path(save_path)
-        outp.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(outp), lit_bgr)
+        try:
+            lit_bgr = render_sh_lit_image(nm, coeffs, order, albedo_map)
+            outp = Path(save_path)
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(outp), lit_bgr)
+        except Exception as e:
+            print(f"Error rendering SH lit image: {e}")
+            return None
 
     return coeffs
 
@@ -140,8 +155,10 @@ class LightingProcessor:
             # Read the maps
             face_img_path = maps_dir / "faces" / (frame_id + ".png")
             normal_map_path = maps_dir / "normals" / (frame_id + ".png")
+            albedo_map_path = maps_dir / "albedos" / (frame_id + ".png")
             face_img = cv2.imread(str(face_img_path))
             normal_map = cv2.imread(str(normal_map_path))
+            albedo_map = cv2.imread(str(albedo_map_path))
             
             if face_img is None or normal_map is None:
                 raise ValueError(f"Could not read images for frame {frame_id}")
@@ -149,7 +166,7 @@ class LightingProcessor:
             # Calculate lighting coefficients
             #coeffs = calculate_lighting_coefficients(face_img, normal_map)
             # coefficients + save lit preview
-            coeffs = calculate_lighting_coefficients(face_img, normal_map, order=3, save_path=str(maps_dir / "lighting" / (frame_id + ".png")))
+            coeffs = calculate_lighting_coefficients(face_img, normal_map, albedo_map, order=3, save_path=str(maps_dir / "lighting" / (frame_id + ".png")))
 
             # convert SH to blender suns
             suns = sh_coeffs_to_suns(coeffs, order=3, K=5)

@@ -142,103 +142,165 @@ def __load_obj_vertices_faces(obj_path):
     print(f"Error loading OBJ file: {str(e)}")
     raise
 
+def load_material_colors(mtl_path):
+    """Parse MTL file and return a dict of material name to Kd color."""
+    colors = {}
+    current = None
+    with open(mtl_path, 'r') as f:
+        for line in f:
+            if line.startswith('newmtl'):
+                current = line.strip().split()[1]
+            elif line.startswith('Kd') and current:
+                kd = [float(x) for x in line.strip().split()[1:4]]
+                colors[current] = kd
+    return colors
+
+def load_face_materials(obj_path):
+    """Parse OBJ file and return a list of material names per face (same order as faces)."""
+    face_materials = []
+    current_mat = None
+    with open(obj_path, 'r') as f:
+        for line in f:
+            if line.startswith('usemtl'):
+                current_mat = line.strip().split()[1]
+            elif line.startswith('f '):
+                face_materials.append(current_mat)
+    return face_materials
+
+def load_face_vertex_material_map(obj_path):
+    """
+    Returns a dict mapping sorted vertex index tuples to material names.
+    """
+    face_vertex_to_material = {}
+    current_mat = None
+    with open(obj_path, 'r') as f:
+        for line in f:
+            if line.startswith('usemtl'):
+                current_mat = line.strip().split()[1]
+            elif line.startswith('f '):
+                parts = line.strip().split()[1:]
+                v_indices = []
+                for idx in parts:
+                    v_idx = int(idx.split('/')[0]) - 1  # OBJ is 1-based
+                    v_indices.append(v_idx)
+                key = tuple(sorted(v_indices))
+                face_vertex_to_material[key] = current_mat
+    return face_vertex_to_material
+
 def create_normal_map(
     image: np.ndarray,
     vertices: np.ndarray,
     faces: np.ndarray,
     face_normals: np.ndarray,
     visible_faces: np.array,
+    obj_path: str = None,
+    mtl_path: str = None,
     alpha: float = 0.3,
-    smooth_factor: float = 1.0
+    smooth_factor: float = 0.5
 ):
-  """Creates a normal map by determining which face is in the foreground for each pixel.
+    image_rows, image_cols, _ = image.shape
 
-  Args:
-    image: Input image
-    vertices: 3D vertices
-    faces: Face indices
-    face_normals: Face normals
-    visible_faces: Indices of visible faces
-    alpha: Blending factor for visualization
-    smooth_factor: Amount of Gaussian blur to apply to the normal map (0.0 to disable)
-  """
-  image_rows, image_cols, _ = image.shape
+    # Create a depth buffer, normal map, and albedo map
+    depth_buffer = np.full((image_rows, image_cols), np.inf)
+    normal_map = np.zeros((image_rows, image_cols, 3), dtype=np.uint8)
+    albedo_map = np.zeros((image_rows, image_cols, 3), dtype=np.uint8)
 
-  # Create a depth buffer and normal map
-  depth_buffer = np.full((image_rows, image_cols), np.inf)
-  normal_map = np.zeros((image_rows, image_cols, 3), dtype=np.uint8)
-  
-  # Get 2D vertices
-  vertices_2d = vertices[:, :2].astype(np.int32)
-  # Process visible faces
-  for face_idx in visible_faces:
-    face = faces[face_idx]
-    face_2d = vertices_2d[face]
-    # Skip faces outside the image bounds
-    if not (np.all(face_2d[:, 0] >= 0) and np.all(face_2d[:, 0] < image_cols) and
-            np.all(face_2d[:, 1] >= 0) and np.all(face_2d[:, 1] < image_rows)):
-      continue
+    # Prepare material info if available
+    face_materials = load_face_materials(obj_path) if obj_path and mtl_path else None
+    material_colors = load_material_colors(mtl_path) if obj_path and mtl_path else None
+    face_vertex_to_material = load_face_vertex_material_map(obj_path) if obj_path and mtl_path else {}
+
+    vertices_2d = vertices[:, :2].astype(np.int32)
+    iris_vertices_2d = []
+    eye_faces_2d = []
+    for face_idx in visible_faces:
+        face = faces[face_idx]
+        face_2d = vertices_2d[face]
+        if not (np.all(face_2d[:, 0] >= 0) and np.all(face_2d[:, 0] < image_cols) and
+                np.all(face_2d[:, 1] >= 0) and np.all(face_2d[:, 1] < image_rows)):
+            continue
+
+        normal = face_normals[face_idx]
+        normal[2] = -normal[2]
+        color = coordinate_utils.xyz_to_rgb(normal.reshape(1, 3))[0].astype(int)
+
+        # Get the material by matching sorted vertex indices
+        key = tuple(sorted(face))
+        mat_name = face_vertex_to_material.get(key, None)
+        if mat_name == 'iris':
+            iris_vertices_2d.extend(face_2d.tolist())
+            continue  # Skip iris faces
+        elif mat_name == 'eye':
+            eye_faces_2d.append(face_2d)
+        if mat_name and material_colors:
+            kd = material_colors.get(mat_name, [0.8, 0.8, 0.8])
+            kd_rgb = (np.array(kd) * 255).astype(np.uint8)
+        else:
+            kd_rgb = np.array([204, 204, 204], dtype=np.uint8)
+
+        min_x = max(0, np.min(face_2d[:, 0]))
+        max_x = min(image_cols - 1, np.max(face_2d[:, 0]))
+        min_y = max(0, np.min(face_2d[:, 1]))
+        max_y = min(image_rows - 1, np.max(face_2d[:, 1]))
+        depth = np.mean(vertices[face, 2])
+
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                if cv2.pointPolygonTest(face_2d, (x, y), False) >= 0:
+                    if depth < depth_buffer[y, x]:
+                        depth_buffer[y, x] = depth
+                        normal_map[y, x] = color
+                        albedo_map[y, x] = kd_rgb[::-1]
+
+    mask = depth_buffer < np.inf
     
-    # Get face normal and convert to color
-    normal = face_normals[face_idx]
-    normal[2] = -normal[2]
-    color = coordinate_utils.xyz_to_rgb(normal.reshape(1, 3))[0].astype(int)
-    
-    # Find bounding box of the face
-    min_x = max(0, np.min(face_2d[:, 0]))
-    max_x = min(image_cols - 1, np.max(face_2d[:, 0]))
-    min_y = max(0, np.min(face_2d[:, 1]))
-    max_y = min(image_rows - 1, np.max(face_2d[:, 1]))
-    
-    # Depth for this face (average Z)
-    depth = np.mean(vertices[face, 2])
-    
-    # Check each pixel in the bounding box
-    for y in range(min_y, max_y + 1):
-      for x in range(min_x, max_x + 1):
-        # Check if pixel is inside the triangle
-        if cv2.pointPolygonTest(face_2d, (x, y), False) >= 0:
-          # If this face is closer than any previous face at this pixel, update the depth buffer and normal map
-          if depth < depth_buffer[y, x]:
-            depth_buffer[y, x] = depth
-            normal_map[y, x] = color
-  
-  # Create a mask of pixels that have a face
-  mask = depth_buffer < np.inf
-  
-  # Apply smoothing if enabled
-  if smooth_factor > 0:
-    # Convert to float for smoothing
-    normal_map_float = normal_map.astype(float)
-    
-    # Apply Gaussian blur to each channel separately
-    for c in range(3):
-      normal_map_float[..., c] = cv2.GaussianBlur(
-          normal_map_float[..., c],
-          (0, 0),  # Let OpenCV calculate kernel size
-          sigmaX=smooth_factor,
-          sigmaY=smooth_factor
-      )
-    
-    # Convert back to uint8
-    normal_map = normal_map_float.astype(np.uint8)
-    
-    # Ensure the smoothed normals are still normalized
-    # Convert to float for normalization
-    normal_map_float = normal_map.astype(float)
-    # Normalize each pixel
-    norm = np.sqrt(np.sum(normal_map_float**2, axis=2, keepdims=True))
-    normal_map_float = normal_map_float / (norm + 1e-6)
-    # Convert back to uint8
-    normal_map = (normal_map_float * 255).astype(np.uint8)
-  
-  # Create a copy of the image for blending
-  overlay = image.copy()
-  overlay[mask] = normal_map[mask]
-  overlay = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
-  cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0, image)
-  
-  return normal_map, mask
+    # 2. If we have iris vertices, compute bounding box, center, and radius
+    if iris_vertices_2d:
+        iris_vertices_2d = np.array(iris_vertices_2d)
+        x_median = np.median(iris_vertices_2d[:, 0])
+        left_cluster = iris_vertices_2d[iris_vertices_2d[:, 0] < x_median]
+        right_cluster = iris_vertices_2d[iris_vertices_2d[:, 0] >= x_median]
+        # Then repeat the bounding box/circle logic for each cluster
+
+        # 3. Draw a black circle for each iris cluster, clipped to the eye region
+        for cluster in [left_cluster, right_cluster]:
+            if len(cluster) == 0:
+                continue
+            # Create an eye mask for this cluster
+            eye_mask = np.zeros(albedo_map.shape[:2], dtype=np.uint8)
+            for face_2d in eye_faces_2d:
+                cv2.fillConvexPoly(eye_mask, face_2d, 255)
+            # Draw the iris circle on a separate mask
+            circle_mask = np.zeros(albedo_map.shape[:2], dtype=np.uint8)
+            center_x = int(np.median(cluster[:, 0]))
+            center_y = int(np.median(cluster[:, 1]))
+            radius = int(
+                max(cluster[:, 0].max() - cluster[:, 0].min(),
+                    cluster[:, 1].max() - cluster[:, 1].min()) / 2
+            )
+            cv2.circle(circle_mask, (center_x, center_y), radius, 255, -1)
+            # Combine masks: only keep circle where it overlaps with the eye
+            iris_mask = cv2.bitwise_and(circle_mask, eye_mask)
+            # Apply to albedo_map (set to black where iris_mask is 255)
+            albedo_map[iris_mask == 255] = (0.2, 0.2, 0.2)
+
+    # Smoothing (if needed) -- apply to both maps
+    if smooth_factor > 0:
+        for arr in [normal_map, albedo_map]:
+            arr_float = arr.astype(float)
+            for c in range(3):
+                arr_float[..., c] = cv2.GaussianBlur(
+                    arr_float[..., c], (0, 0), sigmaX=smooth_factor, sigmaY=smooth_factor
+                )
+            arr[:] = arr_float.astype(np.uint8)
+
+    # Blending for visualization (unchanged)
+    overlay = image.copy()
+    overlay[mask] = normal_map[mask]
+    overlay = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
+    cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0, image)
+
+    return normal_map, mask, albedo_map
 
 def draw_surface_normals(
     image: np.ndarray,
@@ -251,7 +313,7 @@ def draw_surface_normals(
 ):
   """Draws surface normals as colored faces on the image."""
   if image.shape[2] != _BGR_CHANNELS:
-    return None
+    return None, None
   
   # Step 1: Calculate face normals
   face_normals = []
@@ -295,17 +357,17 @@ def draw_surface_normals(
   visible_faces = np.where(visibility > -0.8)[0]
   
   # Step 4: Create normal map
-  normal_map, mask = create_normal_map(
+  normal_map, mask, albedo_map = create_normal_map(
       image,
       vertices_scaled,
       faces,
       face_normals,
       visible_faces,
-      alpha,
-      smooth_factor
+      obj_path="C:\\Users\\balag\\ARTISSN\\Swapping\\propio\\swapper\\utils\\material.obj",
+      mtl_path="C:\\Users\\balag\\ARTISSN\\Swapping\\propio\\swapper\\utils\\material.mtl"
   )
   
-  return normal_map, mask
+  return normal_map, mask, albedo_map
 
 def create_blended_normal_map(
     image,
@@ -323,10 +385,7 @@ def create_blended_normal_map(
 ):
     """
     Create a blended normal map by combining mesh-based and image-based normal maps.
-    All outputs are resized to target_size x target_size while maintaining aspect ratio.
-    
-    Returns:
-        tuple: (blended_normal_map, face_square, mask, ao_map)
+    Now returns maps at the original image size.
     """
     # Create a copy of the image to prevent modifying the original
     image_copy = image.copy()
@@ -343,8 +402,8 @@ def create_blended_normal_map(
         if landmark_px:
             idx_to_coordinates[idx] = landmark_px
     
-    # Create mesh-based normal map
-    mesh_normal_map, mesh_mask = draw_surface_normals(
+    # Create mesh-based normal map (full image size)
+    mesh_normal_map, mesh_mask, albedo_map = draw_surface_normals(
         image=image_copy,
         vertices=vertices,
         faces=faces,
@@ -353,129 +412,16 @@ def create_blended_normal_map(
     )
     
     if debug:
-        # Save mesh-based normal map for debugging
         cv2.imwrite('debug_mesh_normal_map.png', cv2.cvtColor(mesh_normal_map, cv2.COLOR_RGB2BGR))
-        # Debug coordinate conversions
-        from coordinate_utils import debug_coordinate_conversions
-        debug_coordinate_conversions(mesh_normal_map, mesh_mask)
+        cv2.imwrite('debug_albedo_map.png', albedo_map)
+        cv2.imwrite('debug_mesh_mask.png', (mesh_mask.astype(np.uint8) * 255))
     
-    # Create temporary image file for normal_map_generator with only face pixels
-    temp_image_path = 'temp_face_image.png'
-    # Create a copy of the image
-    face_only_image = image.copy()
-    # Set all non-face pixels to black
-    face_only_image[~mesh_mask] = [0, 0, 0]
+    # Create a masked version of the original image
+    masked_image = image.copy()
+    masked_image[mesh_mask == 0] = 0  # Set pixels outside mask to black
     
-    # Get the bounding box of the face mask
-    y_indices, x_indices = np.where(mesh_mask)
-    y_min, y_max = np.min(y_indices), np.max(y_indices)
-    x_min, x_max = np.min(x_indices), np.max(x_indices)
-    
-    # Calculate the size of the square (use the larger dimension)
-    size = max(y_max - y_min, x_max - x_min)
-    
-    # Create a square image for the face data
-    face_square = np.zeros((size, size, 3), dtype=np.uint8)
-    
-    # Calculate the offset to center the face in the square
-    y_offset = (size - (y_max - y_min)) // 2
-    x_offset = (size - (x_max - x_min)) // 2
-    
-    # Copy the face data to the square image
-    face_square[y_offset:y_offset + (y_max - y_min), 
-                x_offset:x_offset + (x_max - x_min)] = face_only_image[y_min:y_max, x_min:x_max]
-    
-    # Resize face_square to target size
-    face_square = cv2.resize(face_square, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
-    
-    if debug:
-        # Save the square face-only image for debugging
-        cv2.imwrite('debug_face_only_image.png', face_square)
-    
-    # Save the square face image as temporary file for normal_map_generator
-    cv2.imwrite(temp_image_path, face_square)
-    
-    # Convert mesh mask to binary format (0 or 255)
-    binary_mask = (mesh_mask * 255).astype(np.uint8)
-    
-    # Create square binary mask and resize to target size
-    square_binary_mask = np.zeros((size, size), dtype=np.uint8)
-    square_binary_mask[y_offset:y_offset + (y_max - y_min), 
-                      x_offset:x_offset + (x_max - x_min)] = binary_mask[y_min:y_max, x_min:x_max]
-    square_binary_mask = cv2.resize(square_binary_mask, (target_size, target_size), 
-                                  interpolation=cv2.INTER_NEAREST)
-    
-    # Generate image-based normal map using normal_map_generator
-    from utils.normal_map_generator import startConvert
-    image_normal_map, ao_map = startConvert(
-        input_file=temp_image_path,
-        smooth=smoothness,
-        intensity=intensity,
-        mask=square_binary_mask
-    )
-    
-    if debug:
-        # Save image-based normal map for debugging
-        cv2.imwrite('debug_image_normal_map.png', image_normal_map)
-        cv2.imwrite('debug_ao_map.png', ao_map)
-        # Debug coordinate conversions for image-based normal map
-        # Convert square_binary_mask to boolean
-        square_mask = square_binary_mask.astype(bool)
-        debug_coordinate_conversions(image_normal_map, square_mask)
-    
-    # Create a square mesh normal map
-    square_mesh_normal = np.zeros((size, size, 3), dtype=np.uint8)
-    square_mesh_normal[y_offset:y_offset + (y_max - y_min), 
-                      x_offset:x_offset + (x_max - x_min)] = mesh_normal_map[y_min:y_max, x_min:x_max]
-    
-    # Resize mesh normal map to target size
-    square_mesh_normal = cv2.resize(square_mesh_normal, (target_size, target_size), 
-                                  interpolation=cv2.INTER_LINEAR)
-    
-    if debug:
-        cv2.imwrite('debug_square_mesh_normal.png', cv2.cvtColor(square_mesh_normal, cv2.COLOR_RGB2BGR))
-    
-    # Create blending weights
-    mesh_weight = np.mean(np.abs(image_normal_map - 127.5), axis=2) / 127.5
-    mesh_weight = np.clip(mesh_weight * 2, 0, 1)  # Amplify the weight
-    mesh_weight = np.stack([mesh_weight] * 3, axis=2)
-    mesh_weight = np.zeros_like(mesh_weight)
-    
-    # Blend the normal maps (now they have the same dimensions)
-    
-    blended_normal_map = (
-        cv2.cvtColor(square_mesh_normal, cv2.COLOR_RGB2BGR) * (1-mesh_weight) +
-        image_normal_map * mesh_weight
-    ).astype(np.uint8)
-    
-    # Create a black background
-    black_background = np.zeros_like(blended_normal_map)
-    
-    # Create square mask for the blended normal map
-    square_mask = square_binary_mask.astype(bool)
-    
-    # Apply the mask to keep only the face region
-    blended_normal_map = np.where(
-        square_mask[..., np.newaxis],  # Expand mask to 3 channels
-        blended_normal_map,
-        black_background
-    )
-    
-    if debug:
-        # Save blended normal map for debugging
-        cv2.imwrite('debug_blended_normal_map.png', blended_normal_map)
-        # Save the square face image for debugging
-        cv2.imwrite('debug_face_square.png', face_square)
-        # Debug coordinate conversions for both images
-        debug_coordinate_conversions(blended_normal_map, square_mask)
-    
-    # Clean up temporary files
-    import os
-    if os.path.exists(temp_image_path):
-        os.remove(temp_image_path)
-    
-    # Return all the processed maps instead of saving them
-    return blended_normal_map, face_square, square_mask, ao_map
+    # Return the masked image instead of the mask
+    return mesh_normal_map, masked_image, albedo_map
 
 def draw_landmarks(
     target_size_x,

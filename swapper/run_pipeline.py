@@ -143,9 +143,10 @@ class CharacterPipeline:
         maps_dir = processed_dir / "maps"
         faces_dir = maps_dir / "faces"
         normals_dir = maps_dir / "normals"
+        albedos_dir = maps_dir / "albedos"
         
         # Create directories
-        for dir_path in [faces_dir, normals_dir]:
+        for dir_path in [faces_dir, normals_dir, albedos_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
         
         # Initialize lighting processor
@@ -230,6 +231,7 @@ class CharacterPipeline:
                     "maps": {
                         "face": str(Path(map_data['face_path']).relative_to(self.base_path)),
                         "normal": str(Path(map_data['normal_path']).relative_to(self.base_path)),
+                        "albedo": str(Path(map_data['albedo_path']).relative_to(self.base_path)),
                         "generated_at": timestamp
                     },
                     "lighting": {
