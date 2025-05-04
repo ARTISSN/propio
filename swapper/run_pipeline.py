@@ -9,7 +9,7 @@ import mediapipe as mp
 import datetime
 import utils.modal_utils as modal_utils
 from utils.mesh_utils import generate_face_mesh, generate_normal_maps
-from utils.lighting_utils import LightingProcessor
+from utils.lighting_utils import LightingProcessor, render_sh_lit_image
 from utils.embedding_utils import get_face_embedding
 import numpy as np
 from utils.keep_alive import prevent_sleep, allow_sleep
@@ -90,7 +90,7 @@ class CharacterPipeline:
             static_image_mode=True,
             max_num_faces=1,
             refine_landmarks=True,
-            min_detection_confidence=0.5,
+            min_detection_confidence=0.3,
             min_tracking_confidence=0.5,
         ) as face_mesh:
             print(f"Processing images in: {source_image_dir}")
@@ -132,7 +132,7 @@ class CharacterPipeline:
         self.save_metadata()
         print(f"Mesh generation completed for {self.character_name}")
 
-    def generate_maps(self):
+    def generate_maps(self, average_lighting=False):
         """Generate texture and normal maps, calculate lighting coefficients, and generate face embeddings."""
         print(f"Generating maps, lighting, and embeddings for {self.character_name}")
         
@@ -157,9 +157,15 @@ class CharacterPipeline:
             print("No mesh files found to process")
             return
         
+        all_coeffs = []
+        frame_coeffs = {}  # To store per-frame coefficients if needed
+        
         # Process each frame
         for mesh_path in mesh_files:
             base_name = mesh_path.stem
+            if base_name not in self.metadata["frames"]:
+                print(f"Frame {base_name} not found in metadata, skipping.")
+                continue
             try:
                 # Use precomputed cropped face image and landmarks from metadata
                 frame_info = self.metadata["frames"][base_name]
@@ -211,12 +217,13 @@ class CharacterPipeline:
                 # Process lighting coefficients
                 lighting_data = lighting_processor.process_frame(base_name, maps_dir)
                 
+                if lighting_data and "coefficients" in lighting_data:
+                    all_coeffs.append(np.array(lighting_data["coefficients"]))
+                    frame_coeffs[base_name] = lighting_data["coefficients"]
+                
                 if not lighting_data:
                     print(f"Failed to calculate lighting for frame {base_name}")
                     continue
-                
-                # Calculate and store top suns
-                suns = lighting_data["suns"] #compute_top_suns(coeffs, K=3)
                 
                 # Update metadata
                 if base_name not in self.metadata["frames"]:
@@ -234,8 +241,7 @@ class CharacterPipeline:
                         "generated_at": timestamp
                     },
                     "lighting": {
-                        #"coefficients": lighting_data["lighting_coefficients"],
-                        "suns": suns,
+                        "coefficients": np.array(lighting_data["coefficients"]).tolist(),
                         "generated_at": timestamp
                     },
                 })
@@ -256,6 +262,14 @@ class CharacterPipeline:
                 import traceback
                 traceback.print_exc()
                 continue
+        
+        if average_lighting and all_coeffs:
+            avg_coeffs = np.mean(np.stack(all_coeffs), axis=0)  # Shape will be (N,3) where N is number of coefficients
+            print("Using average lighting coefficients for all frames.")
+            # Overwrite all frames' lighting coefficients in metadata
+            for base_name in frame_coeffs:
+                self.metadata["frames"][base_name]["lighting"]["coefficients"] = avg_coeffs.tolist()
+            self.save_metadata()
         
         print(f"Map and lighting generation completed for {self.character_name}")
 
@@ -297,6 +311,29 @@ class CharacterPipeline:
         except Exception as e:
             print(f"Error during face swap: {e}")
 
+    def render_images(self):
+        print(f"Rendering SH-lit images for {self.character_name}")
+        processed_dir = self.char_path / "processed"
+        renders_dir = processed_dir / "renders"
+        renders_dir.mkdir(parents=True, exist_ok=True)
+
+        for frame_id, frame_info in self.metadata["frames"].items():
+            try:
+                normal_path = self.base_path / frame_info["maps"]["normal"]
+                albedo_path = self.base_path / frame_info["maps"]["albedo"]
+                normal_map = cv2.imread(str(normal_path))
+                albedo_map = cv2.imread(str(albedo_path))
+                coeffs = np.array(frame_info["lighting"]["coefficients"])  # shape (C,3)
+                out_path = renders_dir / f"{frame_id}_shlit.png"
+                
+                lit_bgr = render_sh_lit_image(normal_map, coeffs, order=3, albedo_map=None)
+                outp = Path(out_path)
+                outp.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(outp), lit_bgr)
+                print(f"Rendered SH-lit image for {frame_id}")
+            except Exception as e:
+                print(f"Error rendering SH-lit image for {frame_id}: {e}")
+
 def main():
     parser = argparse.ArgumentParser(description="Run character processing pipeline")
     parser.add_argument("character", help="Character name to process")
@@ -305,6 +342,7 @@ def main():
     # Pipeline-specific arguments
     parser.add_argument("--mesh", action="store_true", help="Generate 3D mesh")
     parser.add_argument("--maps", action="store_true", help="Generate texture and normal maps")
+    parser.add_argument("--render", action="store_true", help="Render SH-lit images from maps and lighting coefficients")
     
     # Enhanced training arguments
     training_group = parser.add_argument_group('training')
@@ -314,17 +352,18 @@ def main():
     
     parser.add_argument("--swap", help="Perform face swap using normal maps from specified source character")
     parser.add_argument("--all", action="store_true", help="Run all pipeline steps")
+    parser.add_argument("--average-lighting", action="store_true", help="Use average lighting coefficients for all frames")
     args = parser.parse_args()
 
     pipeline = CharacterPipeline(args.character, args.base_path)
     
     # If no specific steps are specified, run all steps
-    run_all = args.all or not (args.mesh or args.maps or args.train)
+    run_all = args.all or not (args.mesh or args.maps or args.train or args.render)
     
     if args.mesh or run_all:
         pipeline.generate_mesh()
     if args.maps or run_all:
-        pipeline.generate_maps()
+        pipeline.generate_maps(average_lighting=args.average_lighting)
     if args.train or run_all:
         try:
             print("Starting LoRA training on Modal...")
@@ -345,6 +384,8 @@ def main():
             print(f"Error during Modal training: {e}")
         finally:
             allow_sleep()
+    if args.render:
+        pipeline.render_images()
 
 if __name__ == "__main__":
     try:

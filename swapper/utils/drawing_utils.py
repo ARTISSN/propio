@@ -286,7 +286,7 @@ def create_normal_map(
             # Combine masks: only keep circle where it overlaps with the eye
             iris_mask = cv2.bitwise_and(circle_mask, eye_mask)
             # Apply to albedo_map (set to black where iris_mask is 255)
-            albedo_map[iris_mask == 255] = (0.2, 0.2, 0.2)
+            albedo_map[iris_mask == 255] = (51, 51, 51)
 
     # Smoothing (if needed) -- apply to both maps
     if smooth_factor > 0:

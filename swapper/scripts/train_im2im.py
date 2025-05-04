@@ -20,7 +20,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 import torch.nn as nn
 from torch.nn import functional as F
 from diffusers import StableDiffusionXLImg2ImgPipeline, DDPMScheduler
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 from torchvision import transforms as T
 from PIL import Image
 import yaml
@@ -315,6 +315,105 @@ def training_step(
         "total_norm": total_norm
     }
 
+def save_lora_state(
+    pipe,
+    unet_ema,
+    output_path,
+    config,
+    global_step=None,
+    epoch=None,
+    best_loss=None,
+    is_checkpoint=False,
+    is_best=False,
+    is_final=False
+):
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Save LoRA weights
+    lora_state_dict = get_peft_model_state_dict(pipe.unet)
+    torch.save(lora_state_dict, output_path / "lora_adapter.pt")
+
+    # Save training state
+    training_state = {
+        "config": config,
+        "ema": unet_ema.state_dict(),
+        "base_model_path": "stabilityai/stable-diffusion-xl-base-1.0"
+    }
+    if is_checkpoint:
+        training_state.update({
+            "step": global_step,
+            "epoch": epoch,
+        })
+    if is_best:
+        training_state["best_loss"] = best_loss
+
+    torch.save(training_state, output_path / "training_state.pt")
+
+def find_lora_checkpoint(training_dir):
+    """
+    Returns the path to the best, final, or latest checkpoint directory in order of preference.
+    """
+    training_dir = Path(training_dir)
+    # 1. Best model
+    best_model = training_dir / "best_model"
+    if best_model.exists():
+        print(f"Loading best model from {best_model}")
+        return best_model
+
+    # 2. Final model
+    final_model = training_dir / "final_model"
+    if final_model.exists():
+        print(f"Loading final model from {final_model}")
+        return final_model
+
+    # 3. Most recent checkpoint
+    checkpoints_dir = training_dir / "checkpoints"
+    if checkpoints_dir.exists():
+        checkpoint_dirs = [d for d in checkpoints_dir.iterdir() if d.is_dir()]
+        if checkpoint_dirs:
+            latest_checkpoint = max(checkpoint_dirs, key=lambda d: d.stat().st_mtime)
+            print(f"Loading latest checkpoint from {latest_checkpoint}")
+            return latest_checkpoint
+
+    raise FileNotFoundError(f"No LoRA checkpoint found in {training_dir}")
+
+def load_checkpoint(training_dir, unet, lora_cfg=None, device="cpu"):
+    """
+    Loads the checkpoint into the provided U-Net model.
+    - If 'unet_lora.pt' exists, loads the full U-Net+LoRA state dict (requires LoRA wrapping).
+    - If 'lora_adapter.pt' exists, loads only the LoRA adapter weights (requires LoRA wrapping).
+    Returns the (possibly wrapped) unet and the training state dict.
+    """
+    checkpoint_dir = find_lora_checkpoint(training_dir)
+    unet_lora_path = checkpoint_dir / "unet_lora.pt"
+    lora_adapter_path = checkpoint_dir / "lora_adapter.pt"
+    state_path = checkpoint_dir / "training_state.pt"
+
+    if lora_adapter_path.exists():
+        print(f"Loading LoRA adapter weights from {lora_adapter_path}")
+        if lora_cfg is None:
+            raise ValueError("lora_cfg must be provided to load LoRA adapter weights.")
+        from peft import get_peft_model
+        unet = get_peft_model(unet, lora_cfg)
+        lora_state_dict = torch.load(lora_adapter_path, map_location=device)
+        unet.load_state_dict(lora_state_dict, strict=False)
+    elif unet_lora_path.exists():
+        print(f"Loading full U-Net+LoRA weights from {unet_lora_path}")
+        if lora_cfg is None:
+            raise ValueError("lora_cfg must be provided to load LoRA weights.")
+        from peft import get_peft_model
+        unet = get_peft_model(unet, lora_cfg)
+        state_dict = torch.load(unet_lora_path, map_location=device)
+        unet.load_state_dict(state_dict, strict=True)
+    else:
+        raise FileNotFoundError(f"No U-Net or LoRA adapter weights found in {checkpoint_dir}")
+
+    if not state_path.exists():
+        raise FileNotFoundError(f"Missing training_state.pt in {checkpoint_dir}")
+    training_state = torch.load(state_path, map_location=device)
+    return unet, training_state
+
 # ─── 4) TRAINING LOOP ──────────────────────────────────────────────────────────
 def train_lora(character_name: str, output_dir: Optional[str] = None, from_checkpoint: bool = False):
     print("\n=== Starting training setup ===")
@@ -329,31 +428,6 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
     global_step = 0
     checkpoint_state = None
     
-    # Load checkpoint if specified
-    if from_checkpoint:
-        print("\nLooking for checkpoint...")
-        checkpoint_dir = output_dir / "checkpoints"
-        if checkpoint_dir.exists():
-            checkpoint_files = list(checkpoint_dir.glob("checkpoint-*"))
-            if checkpoint_files:
-                latest_checkpoint = max(checkpoint_files, key=lambda x: x.stat().st_mtime)
-                print(f"Found latest checkpoint: {latest_checkpoint}")
-            else:
-                print("No checkpoints found, starting fresh training")
-                from_checkpoint = False
-        else:
-            print("No checkpoints directory found, starting fresh training")
-            from_checkpoint = False
-
-    # Use absolute paths with Path objects
-    data_mount = Path(DATA_MOUNT)  # From your constants
-    character_path = data_mount / character_name
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    modal_cache = os.getenv("MODAL_CACHE_DIR", "/workspace/cache")
-    sdxl_cache_path = os.path.join(modal_cache, "huggingface", "sdxl-base-1.0")
-        
     # Load config
     with open("configs/train_config.yaml", "r") as f:
         config = yaml.safe_load(f)
@@ -363,41 +437,73 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
         gradient_accumulation_steps=config["training"]["gradient_accumulation_steps"]
     )
 
-    print(f"Using device: {device}")
-    # Load the SDXL img2img pipeline
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    modal_cache = os.getenv("MODAL_CACHE_DIR", "/workspace/cache")
+    sdxl_cache_path = os.path.join(modal_cache, "huggingface", "sdxl-base-1.0")
+        
+    # 1. Load pipeline and U-Net on CPU
     pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
         sdxl_cache_path,
         torch_dtype=torch.float32,
-    ).to(device)
-    #pipe.unet = torch.compile(pipe.unet)
-    #pipe.unet = pipe.unet.half()
-    
-    pipe.enable_attention_slicing()
-    pipe.enable_vae_slicing()
-    pipe.unet.enable_gradient_checkpointing()
-    #pipe.enable_xformers_memory_efficient_attention()   # if you have xformers installed
+    ).to("cpu")
 
-    # Prepare U-Net for LoRA training
+    # 2. Prepare LoRA config
     lora_cfg = LoraConfig(
         r=config["model"]["lora_rank"],
         lora_alpha=config["model"]["lora_alpha"],
         lora_dropout=config["model"]["lora_dropout"],
         target_modules=[
-            "conv1", "conv2",       # ResNet blocks
-            "conv_shortcut",        # any skip-connections
-            "to_q", "to_k", "to_v", # attention
-            "proj_in", "proj_out"
+            "conv1", "conv2", "conv_shortcut", "to_q", "to_k", "to_v", "proj_in", "proj_out"
         ],
         bias="none",
     )
-    pipe.unet = get_peft_model(pipe.unet, lora_cfg)
-    pipe.unet = pipe.unet.to(device)
 
+    # 3. Initialize EMA on CPU
+    unet_ema = EMAModel(
+        pipe.unet.parameters(),
+        decay=0.9999,
+        model_cls=pipe.unet.__class__,
+        device="cpu"
+    )
 
-    num_added = pipe.tokenizer.add_special_tokens({"additional_special_tokens":["<rrrdaniel>"]})
-    pipe.text_encoder.resize_token_embeddings(len(pipe.tokenizer))
-    if hasattr(pipe, "text_encoder_2"):
-        pipe.text_encoder_2.resize_token_embeddings(len(pipe.tokenizer))
+    # 4. Load checkpoint (on CPU)
+    if from_checkpoint:
+        print("\nLooking for checkpoint...")
+        try:
+            checkpoint_dir = find_lora_checkpoint(output_dir)
+            print(f"Resuming from checkpoint: {checkpoint_dir}")
+            pipe.unet, checkpoint_state = load_checkpoint(output_dir, pipe.unet, lora_cfg=lora_cfg, device="cpu")
+            if "epoch" in checkpoint_state:
+                start_epoch = checkpoint_state["epoch"]
+            if "step" in checkpoint_state:
+                global_step = checkpoint_state["step"]
+            if "optimizer" in checkpoint_state:
+                optimizer.load_state_dict(checkpoint_state["optimizer"])
+            if "scheduler" in checkpoint_state:
+                lr_scheduler.load_state_dict(checkpoint_state["scheduler"])
+            if "ema" in checkpoint_state:
+                unet_ema.load_state_dict(checkpoint_state["ema"])
+        except FileNotFoundError:
+            print("No checkpoint found, starting fresh training")
+            from_checkpoint = False
+    else:
+        pipe.unet = get_peft_model(pipe.unet, lora_cfg)
+
+    # 5. Move everything to GPU
+    pipe = pipe.to(device)
+    unet_ema = EMAModel(
+        pipe.unet.parameters(),
+        decay=0.9999,
+        model_cls=pipe.unet.__class__,
+        device=device
+    )
+    unet_ema.store(pipe.unet.parameters())
+    ema_has_stored = True
+
+    # Use absolute paths with Path objects
+    data_mount = Path(DATA_MOUNT)  # From your constants
+    character_path = data_mount / character_name
 
     # Build DataLoader
     transform = get_image_transform(config["resolution"])
@@ -443,14 +549,6 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
     noise_scheduler = DDPMScheduler.from_pretrained(
         sdxl_cache_path,
         subfolder="scheduler"
-    )
-
-    # Initialize EMA
-    unet_ema = EMAModel(
-        pipe.unet.parameters(),
-        decay=0.9999,
-        model_cls=pipe.unet.__class__,
-        device=device
     )
 
     # Prepare models with accelerator
@@ -516,26 +614,10 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                 # Save checkpoint
                 if global_step % config["training"].get("save_steps", 500) == 0:
                     if accelerator.is_main_process:
-                        checkpoint_path = output_dir / "checkpoints" / f"checkpoint-{epoch}-{global_step}"
-                        checkpoint_path.mkdir(parents=True, exist_ok=True)
-                        
-                        # Save model state
-                        pipe.unet.save_pretrained(checkpoint_path / "unet_lora.pt")
-                        
-                        print("Saving model state")
-                        # Save training state
-                        training_state = {
-                            "step": global_step,
-                            "epoch": epoch,
-                            "config": config,
-                            "optimizer": optimizer.state_dict(),
-                            "scheduler": lr_scheduler.state_dict(),
-                            "ema": unet_ema.state_dict()
-                        }
-                        torch.save(training_state, checkpoint_path / "training_state.pt")
-                        
-                        CHARACTER_DATA_VOLUME.commit()
-                        print("✅ Committed volume changes")
+                        save_lora_state(
+                            pipe, unet_ema, output_dir / "checkpoints" / f"checkpoint-{epoch}-{global_step}", config,
+                            global_step=global_step, epoch=epoch, is_checkpoint=True
+                        )
 
                 global_step += 1
 
@@ -549,7 +631,6 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
         # Store training weights and load EMA weights for validation
         if unet_ema is not None:
             unet_ema.store(pipe.unet.parameters())
-            unet_ema.copy_to(pipe.unet.parameters())
         
         with torch.no_grad():
             for batch in val_loader:
@@ -568,10 +649,6 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                 )
                 total_val_loss += step_output["loss"].item()
 
-        # Restore training weights if using EMA
-        if unet_ema is not None:
-            unet_ema.restore(pipe.unet.parameters())
-
         avg_val_loss = total_val_loss / len(val_loader)
         
         # Early stopping
@@ -581,26 +658,10 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
             
             # Save best model
             if accelerator.is_main_process:
-                unet_ema.store(pipe.unet.parameters())
-                best_model_path = output_dir / "best_model"
-                best_model_path.mkdir(parents=True, exist_ok=True)
-                
-                # Save LoRA state dict
-                torch.save(pipe.unet.state_dict(), best_model_path / "unet_lora.pt")
-                
-                # Save training state
-                training_state = {
-                    "best_loss": best_loss,
-                    "config": config,
-                    "ema": unet_ema.state_dict(),
-                    "base_model_path": "stabilityai/stable-diffusion-xl-base-1.0"
-                }
-                torch.save(training_state, best_model_path / "training_state.pt")
-                
-                CHARACTER_DATA_VOLUME.commit()
-                print("✅ Committed volume changes")
-                
-                unet_ema.restore(pipe.unet.parameters())
+                save_lora_state(
+                    pipe, unet_ema, output_dir / "best_model", config,
+                    best_loss=best_loss, is_best=True
+                )
         else:
             patience_counter += 1
             if patience_counter >= patience:
@@ -612,21 +673,10 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
 
     # Save final model
     if accelerator.is_main_process:
-        final_path = output_dir / "final_model"
-        final_path.mkdir(parents=True, exist_ok=True)
-        
-        # Save final LoRA weights
-        torch.save(pipe.unet.state_dict(), final_path / "unet_lora.pt")
-        
-        # Save final training state
-        training_state = {
-            "config": config,
-            "ema": unet_ema.state_dict(),
-            "base_model_path": "stabilityai/stable-diffusion-xl-base-1.0"
-        }
-        torch.save(training_state, final_path / "training_state.pt")
-        CHARACTER_DATA_VOLUME.commit()
-        print("✅ Committed volume changes")
+        save_lora_state(
+            pipe, unet_ema, output_dir / "final_model", config,
+            is_final=True
+        )
 
     return {
         "status": "success",

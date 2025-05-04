@@ -34,12 +34,15 @@ def render_sh_lit_image(normal_map, coeffs, order=3, albedo_map=None):
     """
     H, W, _ = normal_map.shape
     normals = normal_map.reshape(-1,3)
-    basis  = compute_spherical_harmonics_basis(normals, order)
+    print("normals minmax:", np.min(normals), np.max(normals))
+    basis  = compute_spherical_harmonics_basis(normals, order) 
+    print("basis minmax:", np.min(basis), np.max(basis))
     # compute raw lit color per channel
     lit_rgb = basis.dot(coeffs)                      # shape (M,3)
+    print("lit_rgb minmax:", np.min(lit_rgb), np.max(lit_rgb))
     # apply albedo map
     if albedo_map is None:
-        tint = np.ones((H, W, 3), dtype=np.float32)  # white albedo
+        tint = np.ones((H, W, 3), dtype=np.float32).reshape(-1,3)  # white albedo
     else:
         if albedo_map.dtype == np.uint8:
             # Convert BGR (OpenCV) to RGB for correct color multiplication
@@ -53,44 +56,6 @@ def render_sh_lit_image(normal_map, coeffs, order=3, albedo_map=None):
     # convert to uint8 BGR
     lit_bgr = (lit_img[..., ::-1] * 255).astype(np.uint8)
     return lit_bgr
-
-# Extract top-K sun directions and colors from SH coeffs
-def sh_coeffs_to_suns(coeffs, order=3, K=5, sample_count=5000):
-    """
-    coeffs: (C,3) SH coefficients
-    returns: list of dicts with 'direction', 'color', 'intensity'
-    """
-    # Fibonacci sampling on sphere
-    i = np.arange(sample_count)
-    phi   = np.arccos(1 - 2*(i+0.5)/sample_count)
-    theta = 2 * np.pi * ((i+0.5)/((1+5**0.5)/2))
-    theta %= 2*np.pi
-    # build basis per sample
-    lm = []
-    for l in range(order+1):
-        for m in range(-l, l+1):
-            lm.append((l,m))
-    B = np.stack([np.real(sph_harm(m, l, theta, phi)) for (l,m) in lm], axis=1)
-    # predicted RGB
-    pred_rgb = B.dot(coeffs)                    # (N,3)
-    # compute luminance for ranking
-    Yw = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-    lum = pred_rgb.dot(Yw)
-    # select top K by luminance
-    idx = np.argsort(lum)[-K:][::-1]
-    suns = []
-    for j in idx:
-        th, ph = phi[j], theta[j]
-        # direction in Cartesian
-        x = np.sin(th)*np.cos(ph)
-        y = np.sin(th)*np.sin(ph)
-        z = np.cos(th)
-        suns.append({
-            'direction': (x, y, z),
-            'color':     tuple(pred_rgb[j].tolist()),
-            'intensity': float(lum[j])
-        })
-    return suns
 
 # Main: calculate coefficients, save lit image, return per-channel coeffs
 def calculate_lighting_coefficients(face_img, normal_map, albedo_map, order=3, save_path=None):
@@ -138,7 +103,9 @@ def calculate_lighting_coefficients(face_img, normal_map, albedo_map, order=3, s
         except Exception as e:
             print(f"Error rendering SH lit image: {e}")
             return None
-
+        
+    # Save coefficients as Nx3 array
+    coeffs = np.array(coeffs)
     return coeffs
 
 class LightingProcessor:
@@ -167,14 +134,11 @@ class LightingProcessor:
             #coeffs = calculate_lighting_coefficients(face_img, normal_map)
             # coefficients + save lit preview
             coeffs = calculate_lighting_coefficients(face_img, normal_map, albedo_map, order=3, save_path=str(maps_dir / "lighting" / (frame_id + ".png")))
-
-            # convert SH to blender suns
-            suns = sh_coeffs_to_suns(coeffs, order=3, K=5)
             
             # Create frame data
             frame_data = {
                 "frame_id": frame_id,
-                "suns": suns,
+                "coefficients": coeffs,
                 "face_map": str(face_img_path.relative_to(self.base_path)),
                 "normal_map": str(normal_map_path.relative_to(self.base_path)),
                 "timestamp": datetime.datetime.now().isoformat()
