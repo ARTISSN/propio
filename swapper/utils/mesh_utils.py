@@ -10,6 +10,8 @@ from pathlib import Path
 import utils.drawing_utils as mp_drawing
 import utils.opencv_brightness as cvb
 import re
+import trimesh
+
 
 REF_IMAGE = path = "C:\\Users\\balag\\ARTISSN\\Swapping\\propio\\swapper\\data\\characters\\documale1\\source\\images\\frame_00200.jpg"
 
@@ -21,8 +23,27 @@ def show_mesh(obj_path):
   mesh.plot()
 
 def vertices2obj(vertices,out_path):
-  # Load original .obj file
+  faces = []
   with open("utils/face_model_with_iris.obj", "r") as file:
+      lines = file.readlines()
+      for line in lines:
+        if line.startswith("f "):  
+            line = line.strip().split()
+            inds = []
+            for token in line:
+                if '/' in token:
+                    token = token.split('/')[0]
+                    inds.append(int(token) - 1)
+            faces.append(inds)
+  faces = np.array(faces)
+  vertices=np.array(vertices)
+  mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+  subdivided = mesh.subdivide_loop()
+  subdivided = subdivided.subdivide_loop()
+  vertices=subdivided.vertices
+  
+  # Load original .obj file
+  with open("utils/material.obj", "r") as file:
       lines = file.readlines()
 
   # Convert vertices list to numpy array for rotation
@@ -230,6 +251,18 @@ def generate_normal_maps(mesh_data, processed_dir):
     
     # Load vertices and faces from the OBJ file
     vertices, faces = mp_drawing.__load_obj_vertices_faces(mesh_data['obj_path'])
+
+    #MIGHT NOT NEED THESE LINES BUT WE'LL SEE
+    # vert_inds = [vi for f in faces for vi in f]
+    # verts_per_face = [len(f) for f in faces]
+    
+    # #trying trimesh
+    # mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+    # subdivided = mesh.subdivide()
+
+    # vertices = subdivided.vertices
+    # faces = subdivided.faces
+    
     
     if not mesh_data['landmarks'] or len(mesh_data['landmarks'].landmark) == 0:
         print(f"Warning: No landmarks found for {mesh_data['obj_path']}. Skipping.")

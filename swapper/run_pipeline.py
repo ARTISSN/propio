@@ -14,7 +14,6 @@ from utils.embedding_utils import get_face_embedding
 import numpy as np
 from utils.keep_alive import prevent_sleep, allow_sleep
 import torch
-from utils.calculate_suns import compute_sun_direction, compute_top_suns
 
 class CharacterPipeline:
     def __init__(self, character_name: str, base_path: str = "data"):

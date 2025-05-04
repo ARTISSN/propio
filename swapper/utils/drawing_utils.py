@@ -24,6 +24,8 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import utils.coordinate_utils as coordinate_utils
+import os
+import trimesh
 
 _PRESENCE_THRESHOLD = 0.5
 _VISIBILITY_THRESHOLD = 0.5
@@ -96,6 +98,7 @@ def __load_obj_vertices_faces(obj_path):
               except ValueError as e:
                 print(f"Warning: Invalid vertex line: {line.strip()}")
                 continue
+             
           elif line.startswith('vn '):  # vertex normal
               try:
                 _, x, y, z = line.strip().split()
@@ -213,6 +216,7 @@ def create_normal_map(
     vertices_2d = vertices[:, :2].astype(np.int32)
     iris_vertices_2d = []
     eye_faces_2d = []
+    print("FACE NORMALS: ", face_normals.shape[0])
     for face_idx in visible_faces:
         face = faces[face_idx]
         face_2d = vertices_2d[face]
@@ -317,6 +321,7 @@ def draw_surface_normals(
   
   # Step 1: Calculate face normals
   face_normals = []
+  print("VERTICES: ", vertices.shape[0])
   for face in faces:
     v1, v2, v3 = vertices[face]
     face_normal = -np.cross(v2 - v1, v3 - v1)
@@ -363,8 +368,11 @@ def draw_surface_normals(
       faces,
       face_normals,
       visible_faces,
-      obj_path="C:\\Users\\balag\\ARTISSN\\Swapping\\propio\\swapper\\utils\\material.obj",
-      mtl_path="C:\\Users\\balag\\ARTISSN\\Swapping\\propio\\swapper\\utils\\material.mtl"
+      #obj_path="C:\\Users\\balag\\ARTISSN\\Swapping\\propio\\swapper\\utils\\material.obj",
+      #mtl_path="C:\\Users\\balag\\ARTISSN\\Swapping\\propio\\swapper\\utils\\material.mtl"
+      obj_path=os.path.dirname(os.path.abspath(__file__)) + "/material.obj",
+      mtl_path=os.path.dirname(os.path.abspath(__file__)) + "/material.mtl"
+
   )
   
   return normal_map, mask, albedo_map
