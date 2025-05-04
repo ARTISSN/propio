@@ -29,6 +29,7 @@ import datetime
 from diffusers.training_utils import EMAModel
 from transformers import get_cosine_schedule_with_warmup
 import lpips
+import torchvision
 
 # ─── 1) CONFIGURATION ─────────────────────────────────────────────────────────
 
@@ -168,6 +169,7 @@ def training_step(
     is_training=True,
     config=None,
     lpips_loss_fn=None,
+    vgg=None,
 ):
     """
     Performs a single training/validation step.
@@ -184,6 +186,7 @@ def training_step(
         is_training: Whether this is a training step
         config: Training configuration
         lpips_loss_fn: LPIPS loss function (only needed for training)
+        vgg: VGG model for perceptual loss (only needed for training)
     
     Returns:
         dict: Loss values and predictions
@@ -274,10 +277,25 @@ def training_step(
             decoded_pred = (decoded_pred / 2).clamp(-1, 1)
             decoded_target = (decoded_target / 2).clamp(-1, 1)
 
+            # VGG expects [0, 1] range, 3 channels, and float32
+            vgg_input_pred = (decoded_pred + 1) / 2  # [-1,1] -> [0,1]
+            vgg_input_target = (decoded_target + 1) / 2
+
+            # If needed, resize to 224x224 for VGG
+            vgg_input_pred = F.interpolate(vgg_input_pred, size=(224, 224), mode='bilinear', align_corners=False)
+            vgg_input_target = F.interpolate(vgg_input_target, size=(224, 224), mode='bilinear', align_corners=False)
+
+            # Extract VGG features
+            f_pred = vgg(vgg_input_pred)
+            f_ref = vgg(vgg_input_target)
+
+            # Perceptual loss (L1)
+            loss_perc = F.l1_loss(f_pred, f_ref)
+
             lpips_loss = lpips_loss_fn(decoded_pred, decoded_target).mean()
 
             # Weighted total loss
-            loss = 0.7 * mse_loss + 0.3 * lpips_loss
+            loss = 1 * mse_loss + 0.5 * lpips_loss + 0.5 * loss_perc
 
     if is_training:
         optimizer.zero_grad(set_to_none=True)
@@ -308,6 +326,7 @@ def training_step(
         "loss": loss,
         "mse_loss": mse_loss,
         "lpips_loss": lpips_loss,
+        "loss_perc": loss_perc,
         "noise_pred": noise_pred,
         "noise": noise,
         "mesh_latents": mesh_latents,
@@ -560,6 +579,11 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
     lpips_loss_fn = lpips.LPIPS(net='vgg').to(device)
     lpips_loss_fn.eval()
 
+    # Initialize VGG model
+    vgg = torchvision.models.vgg16(pretrained=True).features.eval().to(device)
+    for p in vgg.parameters():
+        p.requires_grad = False
+
     # Training loop
     best_loss = float('inf')
     patience = config["training"].get("patience", 5)
@@ -583,7 +607,8 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                         unet_ema=unet_ema,
                         is_training=True,
                         config=config,
-                        lpips_loss_fn=lpips_loss_fn
+                        lpips_loss_fn=lpips_loss_fn,
+                        vgg=vgg
                     )
                 except Exception as e:
                     print(f"Error in training step: {e}")
@@ -605,6 +630,7 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                         f"- Total: {step_output['loss']:.4f}\n"
                         f"- MSE:   {step_output['mse_loss']:.4f}\n"
                         f"- LPIPS: {step_output['lpips_loss']:.4f}\n"
+                        f"- Loss Perc: {step_output['loss_perc']:.4f}\n"
                     )
 
                 # Save training preview
@@ -645,7 +671,8 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, from_check
                     unet_ema=unet_ema,
                     is_training=False,
                     config=config,
-                    lpips_loss_fn=lpips_loss_fn
+                    lpips_loss_fn=lpips_loss_fn,
+                    vgg=vgg
                 )
                 total_val_loss += step_output["loss"].item()
 

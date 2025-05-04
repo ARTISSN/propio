@@ -127,33 +127,7 @@ def debug_python_env():
     #    print(f"\nDirectory: {root}")
     #    print("  Files:", files)
     #    print("  Subdirs:", dirs)
-
-def validate_embeddings(metadata: dict) -> bool:
-    print("\nValidating embeddings...")
-    valid = True
-    embedding_dim = None
     
-    if "frames" not in metadata:
-        print("Error: No frames found in metadata")
-        return False
-    
-    print(f"Total frames in metadata: {len(metadata['frames'])}")
-    
-    for frame_id, frame_data in metadata["frames"].items():
-        if "embedding" not in frame_data:
-            print(f"Frame {frame_id} structure: {frame_data.keys()}")
-            continue
-            
-        embedding = frame_data["embedding"]
-       # print(f"Frame {frame_id} embedding type: {type(embedding)}")
-        
-        if isinstance(embedding, (list, tuple)):
-            if embedding_dim is None:
-                embedding_dim = len(embedding)
-            #print(f"Frame {frame_id} embedding length: {len(embedding)}")
-    
-    return valid  # Allow training to proceed for debugging
-
 @app.function(
     image=image,
     gpu=MODAL_GPU,
@@ -199,16 +173,12 @@ def sync_character_data(character_name: str, data_bytes: bytes):
                                 path = path.replace(f"characters/{character_name}/", "", 1)
                                 frame_data["maps"][key] = path
             
-            # Validate embeddings before saving
-            if not validate_embeddings(metadata):
-                raise ValueError("Embedding validation failed. Please check your metadata.json file.")
-            
             # Save updated metadata
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f, indent=2)
         
         print("Data sync completed successfully")
-        print("\nVerifying synced files:")
+        #print("\nVerifying synced files:")
         #for item in volume_path.glob('**/*'):
         #    print(f"  {item.relative_to(volume_path)}")
 
@@ -542,3 +512,93 @@ def create_character_zip(character_path: Path) -> bytes:
                 zip_file.write(item, arcname)
     
     return zip_buffer.getvalue()
+
+@app.function(
+    image=image,
+    gpu=MODAL_GPU,
+    timeout=86400,
+    volumes={
+        DATA_MOUNT: CHARACTER_DATA_VOLUME,
+        CACHE_MOUNT: CACHE_VOLUME,
+    }
+)
+def run_modal_generate_im2im(
+    source_character: str,
+    training_run: str,
+    target_character: str,
+    renders_dir: str,
+    output_dir: str,
+    config_path: str = "configs/train_config.yaml",
+    prompt: str = "<rrrdaniel>"
+):
+    import sys
+    sys.path.insert(0, "/root/swapper")
+    from swapper.scripts.generate_im2im import main as generate_main
+    generate_main(
+        source_character,
+        training_run,
+        target_character,
+        to_modal_path(renders_dir),
+        to_modal_path(output_dir),
+        config_path="/root/swapper/configs/train_config.yaml",
+        prompt=prompt,
+        device="cuda"
+    )
+
+def get_file_manifest(directory: Path):
+    manifest = {}
+    for file in directory.rglob("*"):
+        if file.is_file():
+            manifest[str(file.relative_to(directory))] = os.path.getmtime(file)
+    return manifest
+
+def load_manifest(manifest_path: Path):
+    if manifest_path.exists():
+        with open(manifest_path, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_manifest(manifest: dict, manifest_path: Path):
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+def create_incremental_zip(directory: Path, last_manifest: dict):
+    import io, zipfile
+    new_manifest = get_file_manifest(directory)
+    changed_files = [
+        f for f, mtime in new_manifest.items()
+        if f not in last_manifest or last_manifest[f] != mtime
+    ]
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for rel_path in changed_files:
+            zip_file.write(directory / rel_path, rel_path)
+    return zip_buffer.getvalue(), new_manifest, changed_files
+
+def sync_character_incremental(character_name: str, char_path: Path):
+    manifest_path = char_path / ".last_synced_manifest.json"
+    last_manifest = load_manifest(manifest_path)
+    zip_bytes, new_manifest, changed_files = create_incremental_zip(char_path, last_manifest)
+    if changed_files:
+        print(f"Syncing {len(changed_files)} changed/new files for {character_name}")
+        sync_character_data.remote(character_name, zip_bytes)
+        save_manifest(new_manifest, manifest_path)
+    else:
+        print(f"No changes to sync for {character_name}")
+
+def get_deleted_files(last_manifest, new_manifest):
+    return [f for f in last_manifest if f not in new_manifest]
+
+def to_modal_path(local_path: str) -> str:
+    # Convert to string and normalize slashes
+    local_path = str(local_path).replace("\\", "/")
+    # Remove leading './'
+    if local_path.startswith("./"):
+        local_path = local_path[2:]
+    # Remove leading 'data/' if present
+    if local_path.startswith("data/"):
+        local_path = local_path[5:]
+    # Remove any leading slash
+    if local_path.startswith("/"):
+        local_path = local_path[1:]
+    return f"/workspace/data/{local_path}"

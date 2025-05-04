@@ -14,6 +14,7 @@ from utils.embedding_utils import get_face_embedding
 import numpy as np
 from utils.keep_alive import prevent_sleep, allow_sleep
 import torch
+from utils.modal_utils import sync_character_incremental
 
 class CharacterPipeline:
     def __init__(self, character_name: str, base_path: str = "data"):
@@ -274,40 +275,34 @@ class CharacterPipeline:
         print(f"Map and lighting generation completed for {self.character_name}")
 
     def perform_face_swap(self, source_character: str):
-        """Generate face swaps using normal maps from source character."""
-        print(f"Performing face swap from {source_character} to {self.character_name}")
-        
-        # Set up paths
+        """
+        Generate face swaps using renders from source_character and LoRA from self.character_name.
+        """
+        print(f"Performing face swap: LoRA from {self.character_name}, renders from {source_character}")
+
+        # Paths
         source_char_path = self.base_path / "characters" / source_character
-        source_maps_dir = source_char_path / "processed/maps"
-        source_metadata_path = source_char_path / "metadata.json"
-        
-        output_dir = self.char_path / "swapped"
+        renders_dir = source_char_path / "processed/renders"
+        output_dir = source_char_path / "processed/swapped"
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Load source character metadata
-        if not source_metadata_path.exists():
-            raise ValueError(f"Source character {source_character} metadata not found")
-            
-        with open(source_metadata_path, 'r') as f:
-            source_metadata = json.load(f)
-        
-        # Load our LoRA model path
-        lora_path = self.char_path / "lora_output/best_model"
-        if not lora_path.exists():
-            raise ValueError(f"LoRA model not found for {self.character_name}")
+
+        print(f"Using LoRA from {self.character_name}, training run: training_20250504_201151")
+        print(f"Using renders from {renders_dir}")
         
         # Call Modal function to perform the swap
         try:
-            result = modal_utils.run_modal_swap(
-                target_character=self.character_name,
-                source_character=source_character,
-                source_metadata=source_metadata
-            )
-            if isinstance(result, dict) and result.get("status") == "error":
-                print(f"Face swap failed: {result.get('message')}")
-            else:
-                print("Face swap completed successfully")
+            from utils.modal_utils import app, run_modal_generate_im2im
+            with app.run():
+                sync_character_incremental(self.character_name, self.char_path)
+                sync_character_incremental(source_character, source_char_path)
+                run_modal_generate_im2im.remote(
+                    self.character_name,                # LoRA character
+                    "training_20250504_201151",         # Training run name
+                    source_character,                   # Target character (renders)
+                    str(renders_dir),                   # Renders dir
+                    str(output_dir)                     # Output dir
+                )
+            print("Swap job submitted to Modal.")
         except Exception as e:
             print(f"Error during face swap: {e}")
 
@@ -326,7 +321,7 @@ class CharacterPipeline:
                 coeffs = np.array(frame_info["lighting"]["coefficients"])  # shape (C,3)
                 out_path = renders_dir / f"{frame_id}_shlit.png"
                 
-                lit_bgr = render_sh_lit_image(normal_map, coeffs, order=3, albedo_map=None)
+                lit_bgr = render_sh_lit_image(normal_map, coeffs, order=3, albedo_map=albedo_map)
                 outp = Path(out_path)
                 outp.parent.mkdir(parents=True, exist_ok=True)
                 cv2.imwrite(str(outp), lit_bgr)
@@ -358,7 +353,7 @@ def main():
     pipeline = CharacterPipeline(args.character, args.base_path)
     
     # If no specific steps are specified, run all steps
-    run_all = args.all or not (args.mesh or args.maps or args.train or args.render)
+    run_all = args.all
     
     if args.mesh or run_all:
         pipeline.generate_mesh()
@@ -386,6 +381,8 @@ def main():
             allow_sleep()
     if args.render:
         pipeline.render_images()
+    if args.swap:
+        pipeline.perform_face_swap(args.swap)
 
 if __name__ == "__main__":
     try:
