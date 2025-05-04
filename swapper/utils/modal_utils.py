@@ -544,6 +544,7 @@ def run_modal_generate_im2im(
         prompt=prompt,
         device="cuda"
     )
+    fetch_swapped_faces(target_character, Path(output_dir))
 
 def get_file_manifest(directory: Path):
     manifest = {}
@@ -602,3 +603,44 @@ def to_modal_path(local_path: str) -> str:
     if local_path.startswith("/"):
         local_path = local_path[1:]
     return f"/workspace/data/{local_path}"
+
+@app.function(
+    image=image,
+    gpu=None,  # No GPU needed for file operations
+    timeout=600,
+    volumes={
+        DATA_MOUNT: CHARACTER_DATA_VOLUME,
+    }
+)
+def download_swapped_faces(character_name: str):
+    """
+    Zips and returns the swapped faces directory for a character.
+    """
+    import io
+    import zipfile
+    from pathlib import Path
+
+    swapped_dir = Path(DATA_MOUNT) / character_name / "processed" / "swapped"
+    zip_buffer = io.BytesIO()
+    if not swapped_dir.exists():
+        raise FileNotFoundError(f"No swapped directory found for {character_name}")
+
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for file in swapped_dir.rglob("*"):
+            if file.is_file():
+                arcname = file.relative_to(swapped_dir)
+                zip_file.write(file, arcname)
+    return zip_buffer.getvalue()
+
+def fetch_swapped_faces(character_name: str, local_target_dir: Path):
+    """
+    Downloads swapped faces from Modal and extracts them to local_target_dir.
+    """
+
+    print(f"Requesting swapped faces for {character_name} from Modal...")
+    zip_bytes = download_swapped_faces.remote(character_name)
+    local_target_dir.mkdir(parents=True, exist_ok=True)
+    import io, zipfile
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zip_file:
+        zip_file.extractall(local_target_dir)
+    print(f"Swapped faces downloaded to {local_target_dir}")
