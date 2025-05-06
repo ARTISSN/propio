@@ -405,33 +405,67 @@ class CharacterPipeline:
                 for r in range (face.shape[0]):
                     for c in range (face.shape[1]):
                         #ORIGINALLY CHECKED IF ALL VALUES OF ZERO BUT NOW CHECKING IF ALL VALUES ARE UNDER 1
-                        if all(val > 2 for val in face[r][c]):
+                        if all(val > 30 for val in face[r][c]):
                             image[r + top][c + left] = face[r][c]
                 
-                k = 15
+                k = 9
                 copied_img = image.copy()
                 #after adding the face we do a blur around the edges
                 for r in range (face.shape[0]):
                     for c in range (face.shape[1]):
-                        if all(val > 2 for val in face[r][c]):
+                        if all(val > 30 for val in face[r][c]):
                             #check if we're at the edge by checking for adjacent black pixels
-                            adj_pixels = [face[min(r+1, face.shape[0] - 1)][c], face[max(r-1, face.shape[0] - 1)][c], face[r][min(c+1, face.shape[1] - 1)], face[r][max(c-1, face.shape[1] - 1)]]
-                            for pix in adj_pixels:
-                                if all(val <= 2 for val in pix):
-                                    y = r + top
-                                    x = c + left
-                                    # Compute bounding box of the ROI
-                                    x1 = max(0, x - k // 2)
-                                    y1 = max(0, y - k // 2)
-                                    x2 = min(image.shape[1], x + k // 2 + 1)
-                                    y2 = min(image.shape[0], y + k // 2 + 1)
+                            adj_pixels = [(min(r+1, face.shape[0] - 1), c), (max(r-1, 0), c), (r, min(c+1, face.shape[1] - 1)), (r, max(c-1, 0))]
+                            for (y,x) in adj_pixels:
+                                if all(val <= 30 for val in face[y][x]):
+                                    #find direction from black pixel to our pixel
+                                    vector = np.array([r -  y, c - x])
+                                    coords = []
+                                    start_dir = vector * (k/3)
+                                    start_dir = start_dir.astype(int)
+                                    our_pixel_y = r + top
+                                    our_pixel_x = c + left
+                                    start_y = our_pixel_y - start_dir[0]
+                                    start_x = our_pixel_x - start_dir[1]
+                                    #loop through k pixels in that direction
+                                    for p in range (k):
+                                        blur_y = start_y + (p * vector[0])
+                                        blur_x = start_x + (p * vector[1])
+                                        #append tuple for 2d coordinates of pixels
+                                        coords.append((blur_y, blur_x))
+                                    
+                                    coords_copy = coords.copy()
+                                    ys, xs = zip(*coords_copy)
+                                    flat_blur_line = copied_img[ys, xs]
+                                    flat_blur_line = flat_blur_line.reshape((1, k, 3))
 
-                                    # Extract and blur ROI
-                                    roi = copied_img[y1:y2, x1:x2]
-                                    #blurred_roi = cv2.GaussianBlur(roi, (k, k), 0)
+                                    #create custom directional blur kernel
+                                    kernel = np.zeros((1, k), dtype=np.float32)
+                                    kernel[0, :] = np.linspace(1, 0.1, k)
+                                    kernel /= kernel.sum()
+                                    blurred = np.zeros_like(flat_blur_line)
+        
+                                    blurred = cv2.filter2D(flat_blur_line, -1, kernel)
 
-                                    # Replace the region in the original image
-                                    image[y1:y2, x1:x2] = roi
+                                    # y = r + top
+                                    # x = c + left
+                                    # # Compute bounding box of the ROI
+                                    # x1 = max(0, x - k // 2)
+                                    # y1 = max(0, y - k // 2)
+                                    # x2 = min(image.shape[1], x + k // 2 + 1)
+                                    # y2 = min(image.shape[0], y + k // 2 + 1)
+
+                                    # # Extract and blur ROI
+                                    # roi = copied_img[y1:y2, x1:x2]
+                                    # #blurred_roi = cv2.GaussianBlur(roi, (k, k), 0)
+
+                                    # # Replace the region in the original image
+                                    # image[y1:y2, x1:x2] = roi
+                                    for j in range(blurred.shape[1]):
+                                        y = coords[j][0]
+                                        x = coords[j][1]
+
+                                        image[y, x] = blurred[0][j]
 
                 #Save new image to the output directory
                 base_name = Path(orig_imgs[idx]).stem
