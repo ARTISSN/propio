@@ -96,7 +96,8 @@ def vertices2obj(vertices,out_path):
   print("OBJ file built successfully!")
   return out_path
 
-def crop_face(image_path, face_mesh, output_dir, target_size=512):
+frame_transformations = []
+def crop_face(image_path, face_mesh, output_dir, target_size=512, frame_transformations=None):
     """Crop face from image, preserve aspect ratio, and pad to fixed size."""
     base_name = Path(image_path).stem
     output_path = os.path.join(output_dir, "processed", "faces", f"{base_name}.png")
@@ -163,6 +164,15 @@ def crop_face(image_path, face_mesh, output_dir, target_size=512):
     x_offset = (target_size - new_w) // 2
     y_offset = (target_size - new_h) // 2
     padded[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
+
+    #Append transformation for current frame
+    if frame_transformations is not None:
+        frame_transformations["x_offset"] = x_offset
+        frame_transformations["y_offset"] = y_offset
+        frame_transformations["width"] = crop_w
+        frame_transformations["height"] = crop_h
+        frame_transformations["left"] = left
+        frame_transformations["top"] = top
     
     cv2.imwrite(output_path, padded)
     print(f"Cropped image saved to: {output_path}")

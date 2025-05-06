@@ -531,6 +531,7 @@ def run_modal_generate_im2im(
     config_path: str = "configs/train_config.yaml",
     prompt: str = "<rrrdaniel>"
 ):
+    print("RUN MODAL GEN")
     import sys
     sys.path.insert(0, "/root/swapper")
     from swapper.scripts.generate_im2im import main as generate_main
@@ -620,7 +621,8 @@ def download_swapped_faces(character_name: str):
     import zipfile
     from pathlib import Path
 
-    swapped_dir = Path(DATA_MOUNT) / character_name / "processed" / "swapped"
+    #swapped_dir = Path(DATA_MOUNT) / character_name / "processed" / "swapped"
+    swapped_dir = "tmp"/ Path(DATA_MOUNT) / character_name / "processed" / "swapped"
     zip_buffer = io.BytesIO()
     if not swapped_dir.exists():
         raise FileNotFoundError(f"No swapped directory found for {character_name}")
