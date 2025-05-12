@@ -8,13 +8,14 @@ from typing import Dict, List, Optional
 import mediapipe as mp
 import datetime
 import utils.modal_utils as modal_utils
-from utils.mesh_utils import generate_face_mesh, generate_normal_maps
+from utils.mesh_utils import generate_face_mesh, generate_normal_maps, crop_face
 from utils.lighting_utils import LightingProcessor, render_sh_lit_image
 from utils.embedding_utils import get_face_embedding
 import numpy as np
 from utils.keep_alive import prevent_sleep, allow_sleep
 import torch
 from utils.modal_utils import sync_character_incremental
+import re
 
 class CharacterPipeline:
     def __init__(self, character_name: str, base_path: str = "data"):
@@ -303,8 +304,14 @@ class CharacterPipeline:
                     str(output_dir)                     # Output dir
                 )
             print("Swap job submitted to Modal.")
+            from utils.modal_utils import fetch_swapped_faces
+            fetch_swapped_faces(source_character, Path(output_dir))
         except Exception as e:
             print(f"Error during face swap: {e}")
+        # from utils.modal_utils import fetch_swapped_faces
+        # from utils.modal_utils import download_swapped_faces
+        # fetch_swapped_faces(source_character, output_dir)
+        #PUT THE DRAWING BACK ON HERE
 
     def render_images(self):
         print(f"Rendering SH-lit images for {self.character_name}")
@@ -329,6 +336,152 @@ class CharacterPipeline:
             except Exception as e:
                 print(f"Error rendering SH-lit image for {frame_id}: {e}")
 
+    def extract_number(self, path):
+        match = re.search(r'\d+', path.stem)  # path.stem = filename without extension
+        return int(match.group()) if match else -1
+
+    def draw_face_back_on(self, orig_dir, face_dir, output_dir):
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Get list of image files
+        orig_imgs = []
+        for ext in ['.jpg', '.jpeg', '.png']:
+            orig_imgs.extend(list(Path(orig_dir).glob(f'*{ext}')))
+        
+        if not orig_imgs:
+            print(f"No image files found in {orig_dir}")
+            return
+        
+        # Sort the list numerically using extract_number
+        orig_imgs = sorted(orig_imgs, key=self.extract_number)
+
+        # Get list of image files
+        faces = []
+        for ext in ['.jpg', '.jpeg', '.png']:
+            faces.extend(list(Path(face_dir).glob(f'*{ext}')))
+        
+        if not faces:
+            print(f"No image files found in {face_dir}")
+            return
+        
+        # Sort the list numerically using extract_number
+        faces = sorted(faces, key=self.extract_number)
+
+        #output directory for testing cropped faces
+        test_crop_dir = "/Users/rainergardner-olesen/Desktop/Artissn/face_swap/with_trained_lora/propio/swapper/data/characters/documale1/processed/faces"
+
+        #create face detector for cropping
+        mp_face_mesh = mp.solutions.face_mesh
+        with mp_face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.3) as face_mesh:
+
+            #loop through all faces and original images
+            for idx in range (len(orig_imgs) - len(faces), len(orig_imgs)):
+                image = cv2.imread(orig_imgs[idx])
+                face = cv2.imread(faces[idx - (len(orig_imgs) - len(faces))])
+
+                trans = {}
+
+                #crop the face in order to get the transformations we need
+                crop_face(image_path=orig_imgs[idx], face_mesh=face_mesh, output_dir=test_crop_dir, frame_transformations=trans)
+
+                #Transformation info
+                y_offset = trans["y_offset"]
+                x_offset = trans["x_offset"]
+                height = trans["height"]
+                width = trans["width"]
+                top = trans["top"]
+                left = trans["left"]
+
+                #crop off the edges of the face we dont need
+                face = face[y_offset:face.shape[0]-y_offset, x_offset:face.shape[1]-x_offset]
+
+                #resize to original size
+                face = cv2.resize(face, (width, height), interpolation=cv2.INTER_LINEAR)
+
+                #now we put it back on the original face
+                for r in range (face.shape[0]):
+                    for c in range (face.shape[1]):
+                        #ORIGINALLY CHECKED IF ALL VALUES OF ZERO BUT NOW CHECKING IF ALL VALUES ARE UNDER 1
+                        if all(val > 30 for val in face[r][c]):
+                            image[r + top][c + left] = face[r][c]
+                
+                k = 9
+                copied_img = image.copy()
+                #after adding the face we do a blur around the edges
+                for r in range (face.shape[0]):
+                    for c in range (face.shape[1]):
+                        if all(val > 30 for val in face[r][c]):
+                            #check if we're at the edge by checking for adjacent black pixels
+                            adj_pixels = [(min(r+1, face.shape[0] - 1), c), (max(r-1, 0), c), (r, min(c+1, face.shape[1] - 1)), (r, max(c-1, 0))]
+                            for (y,x) in adj_pixels:
+                                if all(val <= 30 for val in face[y][x]):
+                                    #find direction from black pixel to our pixel
+                                    vector = np.array([r -  y, c - x])
+                                    coords = []
+                                    start_dir = vector * (k/3)
+                                    start_dir = start_dir.astype(int)
+                                    our_pixel_y = r + top
+                                    our_pixel_x = c + left
+                                    start_y = our_pixel_y - start_dir[0]
+                                    start_x = our_pixel_x - start_dir[1]
+                                    #loop through k pixels in that direction
+                                    for p in range (k):
+                                        blur_y = start_y + (p * vector[0])
+                                        blur_x = start_x + (p * vector[1])
+                                        #append tuple for 2d coordinates of pixels
+                                        coords.append((blur_y, blur_x))
+                                    
+                                    coords_copy = coords.copy()
+                                    ys, xs = zip(*coords_copy)
+                                    flat_blur_line = copied_img[ys, xs]
+                                    flat_blur_line = flat_blur_line.reshape((1, k, 3))
+
+                                    #create custom directional blur kernel
+                                    kernel = np.zeros((1, k), dtype=np.float32)
+                                    kernel[0, :] = np.linspace(1, 0.1, k)
+                                    kernel /= kernel.sum()
+                                    blurred = np.zeros_like(flat_blur_line)
+        
+                                    blurred = cv2.filter2D(flat_blur_line, -1, kernel)
+
+                                    # y = r + top
+                                    # x = c + left
+                                    # # Compute bounding box of the ROI
+                                    # x1 = max(0, x - k // 2)
+                                    # y1 = max(0, y - k // 2)
+                                    # x2 = min(image.shape[1], x + k // 2 + 1)
+                                    # y2 = min(image.shape[0], y + k // 2 + 1)
+
+                                    # # Extract and blur ROI
+                                    # roi = copied_img[y1:y2, x1:x2]
+                                    # #blurred_roi = cv2.GaussianBlur(roi, (k, k), 0)
+
+                                    # # Replace the region in the original image
+                                    # image[y1:y2, x1:x2] = roi
+                                    for j in range(blurred.shape[1]):
+                                        y = coords[j][0]
+                                        x = coords[j][1]
+
+                                        image[y, x] = blurred[0][j]
+
+                #Save new image to the output directory
+                base_name = Path(orig_imgs[idx]).stem
+                save_path = "/Users/rainergardner-olesen/Desktop/Artissn/face_swap/with_trained_lora/propio/swapper/data/characters/documale1/processed/finished/" + base_name
+                cv2.imwrite(save_path + '.png',  image)
+
+
+
+
+
+
+
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run character processing pipeline")
     parser.add_argument("character", help="Character name to process")
@@ -338,6 +491,7 @@ def main():
     parser.add_argument("--mesh", action="store_true", help="Generate 3D mesh")
     parser.add_argument("--maps", action="store_true", help="Generate texture and normal maps")
     parser.add_argument("--render", action="store_true", help="Render SH-lit images from maps and lighting coefficients")
+    parser.add_argument("--draw", action="store_true", help="Draw faces on original images")
     
     # Enhanced training arguments
     training_group = parser.add_argument_group('training')
@@ -383,6 +537,11 @@ def main():
         pipeline.render_images()
     if args.swap:
         pipeline.perform_face_swap(args.swap)
+    if args.draw:
+        orig_dir = "/Users/rainergardner-olesen/Desktop/Artissn/face_swap/with_trained_lora/propio/swapper/data/characters/documale1/source/images"
+        faces_dir = "/Users/rainergardner-olesen/Desktop/Artissn/face_swap/with_trained_lora/propio/swapper/data/characters/documale1/processed/swapped/swapped"
+        output_dir = "/Users/rainergardner-olesen/Desktop/Artissn/face_swap/with_trained_lora/propio/swapper/data/characters/documale1/processed/finished"
+        pipeline.draw_face_back_on(orig_dir=orig_dir, face_dir=faces_dir, output_dir=output_dir)
 
 if __name__ == "__main__":
     try:

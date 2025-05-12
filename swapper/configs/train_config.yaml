@@ -1,39 +1,56 @@
-# Training settings
-base_dir: data/characters  # Base directory for character data
-
-# Output
-output_dir: models/lora_weights
-
-# Model settings
+# ─── Global Paths & Model ─────────────────────────────────────────────────────
+base_dir: data/characters              # where your mesh & reference dirs live
+output_dir: models/lora_weights        # where to write checkpoints
 sdxl_model_path: stabilityai/stable-diffusion-xl-base-1.0
 
-resolution: 512 
-controlnet_resolution: 512
+# ─── Resolution & Progression ────────────────────────────────────────────────
+data:
+  initial_resolution: 256                # start here for warm-up
+  full_resolution:    512                # later for fine detail
+  progressive_switch_epoch: 10           # when to switch to full_resolution
 
-training:
-  resolution: 512 
-  num_epochs: 200
-  max_train_steps: 10000
-  batch_size: 2
-  gradient_accumulation_steps: 4
-  learning_rate: 0.0001
-  warmup_ratio: 0.05
-  patience: 40
-  save_steps: 500
-  preview_steps: 50
-  log_steps: 10
-  
+# ─── Epoch Boundaries ────────────────────────────────────────────────────────
+schedule:
+  spatial:
+    num_epochs:         200              # total spatial epochs
+    perceptual_start:   0                # epoch to start AuraFace & LPIPS
+    gan_start:          0               # epoch to start adversarial loss
+  temporal:
+    latent_phase_epochs: 10              # number of epochs in latent-space stage
+    pixel_phase_epochs:  10              # number of epochs in pixel-polish stage
+
+# ─── Diffusion Settings ──────────────────────────────────────────────────────
+diffusion:
+  num_timesteps: 20                      # number of denoising steps for both training and inference
+  denoising_strength: 0.8
+  prompt: "<rrrdaniel>"                  # text prompt for conditioning
+  guidance_scale: 7.5                    # classifier-free guidance scale
+
+# ─── Spatial-Stage Loss Weights & Frequencies ─────────────────────────────────
+loss_spatial:
+  lambda_mse:    1.0                     # latent MSE
+  lambda_patch:  0.3                     # single-patch MSE
+  lambda_id:     0.25                    # AuraFace identity
+  lambda_lpips:  0.5                     # LPIPS (256², see below)
+  lambda_adv:    10                       # GAN generator weight
+  gan_frequency: 2                       # every N steps for both D & G
+  lpips_frequency: 2                     # every N steps for LPIPS
+  id_frequency: 4                        # every N steps for AuraFace ID
+  patch_ratio: 0.2
+
+# ─── Temporal-Stage Loss Weights & Settings ──────────────────────────────────
+loss_temporal:
+  pairs_per_epoch:     5                 # K in latent-phase batching
+  lambda_id:           0.50              # AuraFace identity in temporal
+  lambda_lpips:        0.10              # LPIPS in pixel-polish
+  lpips_frequency:     1                 # every N frames/steps
+
+# ─── LoRA / Model Config ─────────────────────────────────────────────────────
 model:
-  lora_rank: 4
-  lora_alpha: 32
-  lora_dropout: 0.1
-  lambda_identity: 0.25
-  lighting_dim: 16
-  hidden_dim: 512
-  output_dim: 2048 
-  ema_decay: 0.9999
-  bias: none
-  task_type: UNET
+  lora_rank:       4
+  lora_alpha:     32
+  lora_dropout:   0.1
+  ema_decay:      0.9999
   target_modules:
     - to_q
     - to_k
@@ -42,16 +59,25 @@ model:
     - ff.net.0.proj
     - ff.net.2
 
-controlnet:
-  input_channels: 3
-  conditioning: normal_map
-  resolution: 512
+# ─── Training & Optimization ─────────────────────────────────────────────────
+training:
+  batch_size:                   1
+  gradient_accumulation_steps:  4
+  learning_rate:                1e-4
+  warmup_ratio:                 0.001
+  max_train_steps:              10000
+  spatial_early_stop_patience:  10
+  temporal_early_stop_patience: 3
 
 optimization:
-  mixed_precision: "bf16"
-  use_8bit_adam: true
+  mixed_precision:        bf16
+  use_8bit_adam:          true
   gradient_checkpointing: true
-  enable_xformers: true
+  enable_xformers:        false
 
+# ─── Debug / Logging ──────────────────────────────────────────────────────────
 debug:
-  enabled: true  # Set to true to enable detailed debugging output
+  enabled: false
+  log_steps:      10
+  save_steps:     500
+  preview_steps:  50

@@ -35,26 +35,27 @@ def verify_local_data(character_name: str):
 
 # Create image with requirements
 image = (modal.Image.debian_slim(python_version="3.10")
-         # 1. System dependencies first
-         .apt_install([
-             "git",
-             "wget", 
-             "curl",
-             "libgl1-mesa-glx",
-             "libglib2.0-0",
-             "build-essential",
-             "bzip2"
-         ])
-         # 2. Python dependencies
-         .pip_install(
-             "torch==2.1.1+cu118", 
-             "torchvision==0.16.1+cu118",
-             extra_index_url="https://download.pytorch.org/whl/cu118"
-         )
-         .pip_install("huggingface-hub==0.19.4")
-         .pip_install_from_requirements(REQUIREMENTS_PATH)
-         # 3. Add local files
-         .add_local_dir(".", remote_path="/root/swapper"))
+        # 1. System dependencies first
+        .apt_install([
+            "git",
+            "wget", 
+            "curl",
+            "libgl1-mesa-glx",
+            "libglib2.0-0",
+            "build-essential",
+            "bzip2"
+        ])
+        # 2. Python dependencies
+        .pip_install(
+            "torch==2.1.1+cu118", 
+            "torchvision==0.16.1+cu118",
+            "onnxruntime-gpu==1.15.1",
+            extra_index_url="https://download.pytorch.org/whl/cu118"
+        )
+        .pip_install("huggingface-hub==0.19.4")
+        .pip_install_from_requirements(REQUIREMENTS_PATH)
+        # 3. Add local files
+        .add_local_dir(".", remote_path="/root/swapper"))
 
 def _download_models_internal(cache_mount_path: str):
     """Internal function to download SDXL model without Modal decoration"""
@@ -85,7 +86,8 @@ def _download_models_internal(cache_mount_path: str):
         print("Downloading SDXL base model...")
         pipe = StableDiffusionXLPipeline.from_pretrained(
             "stabilityai/stable-diffusion-xl-base-1.0",
-            torch_dtype=torch.float32,
+            torch_dtype=torch.bfloat16,
+            device_map="balanced"
         )
             
         print(f"Saving model to cache: {cache_path}")
@@ -239,19 +241,13 @@ def train_remote(character_name: str, training_config: Optional[Dict] = None):
         training_config = training_config or {}
         from_checkpoint = training_config.get("from_checkpoint")
         if from_checkpoint:
-            # Verify checkpoint exists
             checkpoint_dir = trainings_dir / from_checkpoint
             if not checkpoint_dir.exists():
                 raise ValueError(f"Checkpoint directory not found: {from_checkpoint}")
-            
-            # Create new training directory
+            # Create new training directory for this run
             training_dir = trainings_dir / get_training_dir_name(training_config.get("training_name"))
-            
-            # Copy checkpoint contents to new training directory
-            print(f"Copying checkpoint from {checkpoint_dir} to {training_dir}")
-            shutil.copytree(checkpoint_dir, training_dir, dirs_exist_ok=True)
+            training_dir.mkdir(parents=True, exist_ok=True)
         else:
-            # Create new training directory
             training_dir = trainings_dir / get_training_dir_name(training_config.get("training_name"))
             training_dir.mkdir(parents=True, exist_ok=True)
         print(f"\nTraining will be saved to: {training_dir}")
@@ -329,11 +325,11 @@ def train_remote(character_name: str, training_config: Optional[Dict] = None):
         
         # Now use the already imported module
         print("Starting training...")
-        # Update the output directory in the training function
+        # Pass resume_from to train_lora
         result = training_module.train_lora(
             character_name=character_name,
             output_dir=str(training_dir),
-            from_checkpoint=bool(from_checkpoint)
+            resume_from=str(checkpoint_dir) if from_checkpoint else None
         )
     
         if result["status"] == "success":
@@ -394,15 +390,17 @@ def run_modal_train(character_name: str, training_config: Optional[Dict] = None)
             if training_config and training_config.get("from_checkpoint"):
                 print(f"Resuming from checkpoint: {training_config['from_checkpoint']}")
             
-            # Sync data and train
-            sync_character_data.remote(character_name, create_character_zip(local_char_path))
+            # Use incremental sync for efficiency
+            sync_character_incremental(character_name, local_char_path)
+            secondary_char = "documale1"
+            sync_character_incremental(secondary_char, verify_local_data(secondary_char))
             
             print("Data sync completed, starting training...")
             result = train_remote.remote(character_name, training_config)
             
             if result["status"] == "success":
                 print("\nTraining completed successfully")
-                verify_saved_files.remote(character_name)
+                #verify_saved_files.remote(character_name)
                 
                 # Download model
                 #print("\nDownloading trained model...")
@@ -531,6 +529,7 @@ def run_modal_generate_im2im(
     config_path: str = "configs/train_config.yaml",
     prompt: str = "<rrrdaniel>"
 ):
+    print("RUN MODAL GEN")
     import sys
     sys.path.insert(0, "/root/swapper")
     from swapper.scripts.generate_im2im import main as generate_main
@@ -544,7 +543,6 @@ def run_modal_generate_im2im(
         prompt=prompt,
         device="cuda"
     )
-    fetch_swapped_faces(target_character, Path(output_dir))
 
 def get_file_manifest(directory: Path):
     manifest = {}
@@ -620,7 +618,8 @@ def download_swapped_faces(character_name: str):
     import zipfile
     from pathlib import Path
 
-    swapped_dir = Path(DATA_MOUNT) / character_name / "processed" / "swapped"
+    #swapped_dir = Path(DATA_MOUNT) / character_name / "processed" / "swapped"
+    swapped_dir = "tmp"/ Path(DATA_MOUNT) / character_name / "processed" / "swapped"
     zip_buffer = io.BytesIO()
     if not swapped_dir.exists():
         raise FileNotFoundError(f"No swapped directory found for {character_name}")

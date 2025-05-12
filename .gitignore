@@ -2,3 +2,5 @@
 *.safetensors
 *.pt
 *.ckpt
+*.npz
+*.safetensors

@@ -1,5 +1,5 @@
 # Core ML/DL Dependencies
-torch==2.1.1+cu118
+torch==2.1.1
 torchvision==0.16.1+cu118
 
 diffusers==0.33.0
@@ -22,6 +22,7 @@ lpips==0.1.4
 
 # Face Processing
 dlib-bin==19.24.6
+insightface==0.7.3
 
 # Required Utils
 PyYAML==6.0.1
