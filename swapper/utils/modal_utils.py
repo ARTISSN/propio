@@ -381,6 +381,7 @@ def verify_saved_files(character_name: str):
 @app.local_entrypoint()
 def run_modal_train(character_name: str, training_config: Optional[Dict] = None):
     """Run the training pipeline with support for checkpoints and multiple runs."""
+    app.set_description("LoRA Training")
     try:
         with app.run():
             # First verify local data exists

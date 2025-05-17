@@ -19,7 +19,7 @@ from typing import Optional
 from torch.utils.data import Dataset, DataLoader, random_split
 import torch.nn as nn
 from torch.nn import functional as F
-from diffusers import StableDiffusionXLImg2ImgPipeline, DPMSolverMultistepScheduler, EulerDiscreteScheduler
+from diffusers import StableDiffusionXLImg2ImgPipeline, DDPMScheduler, EulerDiscreteScheduler
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 from torchvision import transforms as T
 from PIL import Image
@@ -28,7 +28,7 @@ from accelerate import Accelerator
 import datetime
 from diffusers.training_utils import EMAModel
 from huggingface_hub import snapshot_download
-from insightface.app import FaceAnalysis
+from facenet_pytorch import MTCNN, InceptionResnetV1
 from transformers import get_cosine_schedule_with_warmup
 import lpips
 import torchvision
@@ -63,9 +63,15 @@ CACHE_VOLUME = modal.Volume.from_name("model-cache", create_if_missing=True)  # 
 # ─── 2) CLASSES ────────────────────────────────────────────────────────────────
 class GradStableDiffusionXLImg2ImgPipeline(StableDiffusionXLImg2ImgPipeline):
     def __call__(self, *args, **kwargs):
-        # Temporarily lift the no_grad guard so everything is differentiable
-        with torch.enable_grad():
-            return super().__call__(*args, **kwargs)
+        grad_enabled = kwargs.get("gradient", False)
+        # Call the original function, not the no_grad wrapper
+        raw_call = super().__call__.__wrapped__
+        if grad_enabled:
+            with torch.enable_grad():
+                return raw_call(self, *args, **kwargs)
+        else:
+            with torch.no_grad():
+                return raw_call(self, *args, **kwargs)
 
 class PatchDiscriminator(nn.Module):
     """PatchGAN discriminator for adversarial loss."""
@@ -78,6 +84,7 @@ class PatchDiscriminator(nn.Module):
             layers.append(nn.LeakyReLU(0.2, inplace=True))
             prev_ch = feat
         layers.append(nn.Conv2d(prev_ch, 1, kernel_size=4, stride=1, padding=1))
+        layers.append(nn.Sigmoid())       # <<< now D(x) ∈ [0,1]
         self.model = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -128,17 +135,44 @@ class MeshFaceDataset(Dataset):
         all_faces = sorted((character_path / "processed" / "faces").glob("*.png"))
         print(f"Found {len(all_renders)} renders and {len(all_faces)} faces")
 
-        # Only keep pairs where the stem is not in the blacklist
+        # Create dictionaries for easy lookup
+        render_dict = {r.stem: r for r in all_renders}
+        face_dict = {f.stem: f for f in all_faces}
+
+        # Verify matching pairs
         self.renders = []
         self.faces = []
-        for r, f in zip(all_renders, all_faces):
-            stem = r.stem
-            if stem not in blacklist:
-                self.renders.append(r)
-                self.faces.append(f)
-
+        mismatched_pairs = []
+        
+        for render_path in all_renders:
+            stem = render_path.stem
+            if stem in blacklist:
+                continue
+                
+            if stem not in face_dict:
+                mismatched_pairs.append(f"Render {stem} has no matching face")
+                continue
+                
+            self.renders.append(render_path)
+            self.faces.append(face_dict[stem])
+            
+        # Report any mismatches
+        if mismatched_pairs:
+            print("\n⚠️ Found mismatched pairs:")
+            for msg in mismatched_pairs:
+                print(f"  - {msg}")
+            print(f"\nTotal mismatches: {len(mismatched_pairs)}")
+            
+        # Verify we have matching pairs
         assert len(self.renders) == len(self.faces), \
-            "Render and face counts do not match after applying blacklist!"
+            f"Render and face counts do not match after applying blacklist! Renders: {len(self.renders)}, Faces: {len(self.faces)}"
+            
+        # Verify all pairs have matching stems
+        for r, f in zip(self.renders, self.faces):
+            assert r.stem == f.stem, f"Mismatched pair found: {r.stem} != {f.stem}"
+            
+        print(f"Successfully paired {len(self.renders)} matching render/face pairs")
+        
         self.tf = transform
         self.character_path = character_path
         self.vae = vae
@@ -196,8 +230,8 @@ class MeshFaceDataset(Dataset):
                 raise RuntimeError("VAE not provided for on-demand latent generation")
             # If latents don't exist, create them
             with torch.no_grad():
-                mesh_latent = self.vae.encode(self.tf(render_img).unsqueeze(0)).latent_dist.sample()
-                ref_latent = self.vae.encode(self.tf(face_img).unsqueeze(0)).latent_dist.sample()
+                mesh_latent = self.vae.encode(self.tf(render_img).unsqueeze(0)).latent_dist.sample() * self.vae.config.scaling_factor
+                ref_latent = self.vae.encode(self.tf(face_img).unsqueeze(0)).latent_dist.sample() * self.vae.config.scaling_factor
                 
                 # Debug prints for generated latents
                 debug_print(f"Generated latent shapes - mesh: {mesh_latent.shape}, ref: {ref_latent.shape}")
@@ -312,8 +346,8 @@ def preencode_latents(pipe, tf, character_path, device="cuda", resolution=None):
             face_img = face_img.unsqueeze(0).to(device)
 
             # Encode to latents and ensure correct dimensions
-            mesh_latent = vae.encode(render_img).latent_dist.sample()
-            ref_latent = vae.encode(face_img).latent_dist.sample()
+            mesh_latent = vae.encode(render_img).latent_dist.sample() * vae.config.scaling_factor
+            ref_latent = vae.encode(face_img).latent_dist.sample() * vae.config.scaling_factor
             
             # Ensure latents are 4D [B, C, H, W]
             if mesh_latent.dim() == 5:
@@ -341,9 +375,10 @@ def latent_to_image(pipe, latents, device, batch_idx=0, return_type="pil"):
         latents: Input latents tensor [B,C,H,W]
         device: Device to perform computation on
         batch_idx: Index of the batch to convert (default: 0)
-        return_type: One of ["pil", "tensor", "numpy"] to specify return format
+        return_type: One of ["pil", "tensor", "numpy", "tensor_hwc"] to specify return format
                     - "pil": PIL Image
-                    - "tensor": torch.Tensor in [-1,1] range
+                    - "tensor": torch.Tensor in [0,255] range, shape [B,3,H,W]
+                    - "tensor_hwc": torch.Tensor in [0,255] range, shape [B,H,W,3]
                     - "numpy": numpy array in [0,255] range
         
     Returns:
@@ -357,19 +392,25 @@ def latent_to_image(pipe, latents, device, batch_idx=0, return_type="pil"):
     latents = latents.to(pipe.vae.dtype)
     
     # Decode latents
-    with torch.no_grad():
-        decoded = pipe.vae.decode(latents).sample
-        img = decoded[batch_idx]  # [3,H,W] in [0,1] range
-        
-        if return_type == "tensor":
-            # Convert to [-1,1] range
-            return (img * 2 - 1).to(device)
-        elif return_type == "numpy":
-            # Convert to [0,255] range
-            return (img * 255).clamp(0,255).byte().permute(1,2,0).cpu().numpy()
-        else:  # "pil"
-            # Convert to PIL Image
-            return Image.fromarray((img * 255).clamp(0,255).byte().permute(1,2,0).cpu().numpy())
+    decoded = pipe.vae.decode(latents).sample  # [B,3,H,W]
+
+    # Check if we need to scale from [-1,1] to [0,1]
+    if round(decoded.min().item()) < 0:
+        decoded = (decoded + 1) / 2
+    
+    # Scale to [0,255] and clamp
+    decoded = (decoded * 255).clamp(0, 255)
+    
+    if return_type == "tensor":
+        # Return in [B,3,H,W] format
+        return decoded.to(device)
+    elif return_type == "tensor_hwc":
+        # Return in [B,H,W,3] format
+        return decoded.permute(0, 2, 3, 1).to(device)
+    else:  # "pil"
+        # Convert single image to PIL
+        img = decoded[batch_idx]  # [3,H,W]
+        return Image.fromarray(img.byte().permute(1,2,0).cpu().numpy())
 
 def save_training_preview(pipe, batch, output_dir, step, device, config):
     """Save a training preview with mesh, reference, and generated images."""
@@ -395,7 +436,8 @@ def save_training_preview(pipe, batch, output_dir, step, device, config):
                 image=mesh_imgs[:1],
                 prompt=config["diffusion"]["prompt"],
                 num_inference_steps=config["diffusion"]["num_timesteps"],
-                guidance_scale=config["diffusion"]["guidance_scale"]
+                guidance_scale=config["diffusion"]["guidance_scale"],
+                gradient=False
             ).images[0]
             
             # For debug purposes, if we want to visualize how the latents decode directly
@@ -441,6 +483,24 @@ def to_float(val):
         return float(val)
     except:
         return 0.0
+    
+def sample_timesteps_linear(epoch, config, noise_scheduler, batch_size, device):
+    """
+    Linearly increase available timesteps by `step_frac` each epoch.
+    At epoch=0 you get `step_frac`*T, at epoch=1 you get 2*step_frac*T, etc.
+    Once you hit 100%, you stay there.
+    """
+    T = noise_scheduler.config.num_train_timesteps
+    # how much to grow per epoch (e.g. 0.1 for 10% per epoch)
+    step_frac = config["schedule"]["spatial"].get("curriculum_step_frac", 0.1)
+
+    # compute fraction of the full schedule to allow this epoch
+    frac = min(1.0, (epoch + 1) * step_frac)
+    # compute max index (at least 1)
+    t_max = max(1, int(frac * T))
+
+    # sample uniformly from [0, t_max)
+    return torch.randint(0, t_max, (batch_size,), device=device)
 
 def forward_pass(
     pipe,
@@ -449,6 +509,8 @@ def forward_pass(
     seq_embeds,
     pooled_embeds,
     device,
+    epoch: int,
+    config: dict,
 ):
     """Perform a forward pass through the UNet.
     
@@ -459,6 +521,8 @@ def forward_pass(
         seq_embeds: Sequence embeddings [1, seq_len, hidden_dim]
         pooled_embeds: Pooled embeddings [1, hidden_dim]
         device: Device to use
+        epoch: Current training epoch
+        config: Configuration dictionary
         
     Returns:
         tuple: (noise_pred, noise, timesteps, noisy_ref, mesh_imgs, ref_imgs, mesh_latents, ref_latents)
@@ -475,12 +539,12 @@ def forward_pass(
     # Move to device
     mesh_imgs = mesh_imgs.to(device)
     mesh_latents = mesh_latents.to(device)
-    ref_latents = ref_latents.to(device)
-    ref_imgs = ref_imgs.to(device)
+    ref_latents = ref_latents.to(device).detach()
+    ref_imgs = ref_imgs.to(device).detach()
     
     # Add noise to ref latents
     noise = torch.randn_like(ref_latents)
-    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (mesh_latents.shape[0],), device=device)
+    timesteps = sample_timesteps_linear(epoch, config, noise_scheduler, mesh_latents.shape[0], device)
     noisy_ref = noise_scheduler.add_noise(ref_latents, noise, timesteps)
         
     # expand prompt embeddings for both conditioned and unconditioned
@@ -522,27 +586,38 @@ def forward_pass(
     
     return noise_pred, noise, timesteps, noisy_ref, mesh_imgs, ref_imgs, mesh_latents, ref_latents
 
-def calculate_mse_patch_loss(noise_pred, noise, config):
+def calculate_mse_patch_loss(noise_pred, noise, alpha_bar, config):
     """Calculate MSE and patch losses.
     
     Args:
         noise_pred: Predicted noise [B,C,H,W]
         noise: Target noise [B,C,H,W]
+        alpha_bar: Alpha bar values for current timesteps [B,1,1,1]
         config: Configuration dictionary
         
     Returns:
         tuple: (mse_loss, patch_loss)
     """
-    # MSE loss
-    mse_loss = F.mse_loss(noise_pred, noise)
+    # Calculate signal-to-noise ratio weights (1/√(ᾱ_t))
+    snr       = torch.sqrt(alpha_bar / (1 - alpha_bar))
+    
+    # Weighted MSE loss
+    mse_loss = F.mse_loss(noise_pred, noise) #(snr * (noise_pred - noise) ** 2).mean()
     
     # Patch loss
     H, W = noise_pred.shape[-2:]
     ps = int(H * config["loss_spatial"]["patch_ratio"])
-    y, x = torch.randint(0, H-ps+1, (1,)), torch.randint(0, W-ps+1, (1,))
-    p_pred = noise_pred[:, :, y:y+ps, x:x+ps]
-    p_gt = noise[:, :, y:y+ps, x:x+ps]
-    patch_loss = F.mse_loss(p_pred, p_gt)
+    
+    # Calculate patch loss from 5 random locations
+    patch_losses = []
+    for _ in range(5):
+        y, x = torch.randint(0, H-ps+1, (1,)), torch.randint(0, W-ps+1, (1,))
+        p_pred = noise_pred[:, :, y:y+ps, x:x+ps]
+        p_gt = noise[:, :, y:y+ps, x:x+ps]
+        patch_losses.append(F.mse_loss(p_pred, p_gt))
+    
+    # Average the patch losses
+    patch_loss = torch.stack(patch_losses).mean()
     
     return mse_loss, patch_loss
 
@@ -553,8 +628,8 @@ def calculate_perceptual_loss(pipe, latents, ref_latents, vgg, lpips_loss_fn, de
         pipe: The SDXL pipeline
         latents: Predicted latents [B,C,H,W]
         ref_latents: Target latents [B,C,H,W]
-        vgg: VGG model for perceptual features
-        lpips_loss_fn: LPIPS loss function
+        vgg: VGG model for perceptual features (expects [0,1] range)
+        lpips_loss_fn: LPIPS loss function (expects [-1,1] range)
         device: Device to use
         
     Returns:
@@ -577,6 +652,19 @@ def calculate_perceptual_loss(pipe, latents, ref_latents, vgg, lpips_loss_fn, de
         vgg_input_pred = F.interpolate(decoded, size=(224, 224), mode='bilinear', align_corners=False)
         vgg_input_target = F.interpolate(decoded_target, size=(224, 224), mode='bilinear', align_corners=False)
         
+        # Check if we need to scale to [0,1] for VGG
+        if round(vgg_input_pred.min().item()) < 0:
+            vgg_input_pred = (vgg_input_pred + 1) / 2
+            vgg_input_target = (vgg_input_target + 1) / 2
+
+        normalize = T.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std =[0.229, 0.224, 0.225]
+        )
+
+        vgg_input_pred = normalize(vgg_input_pred.clamp(0, 1))
+        vgg_input_target = normalize(vgg_input_target.clamp(0, 1))
+        
         # Extract VGG features
         f_pred = vgg(vgg_input_pred)
         f_ref = vgg(vgg_input_target)
@@ -584,9 +672,17 @@ def calculate_perceptual_loss(pipe, latents, ref_latents, vgg, lpips_loss_fn, de
         # VGG perceptual loss (L1)
         vgg_loss = F.l1_loss(f_pred, f_ref)
         
-        # Normalize to [-1,1] for LPIPS
-        pred_n = decoded * 2 - 1
-        tgt_n = decoded_target * 2 - 1
+        # Check if we need to scale to [-1,1] for LPIPS
+        if round(decoded.min().item()) >= 0:  # If in [0,1] range
+            pred_n = decoded * 2 - 1
+            tgt_n = decoded_target * 2 - 1
+        else:  # Already in [-1,1] range
+            pred_n = decoded
+            tgt_n = decoded_target
+        
+        # Ensure [-1,1] range for LPIPS
+        pred_n = pred_n.clamp(-1, 1)
+        tgt_n = tgt_n.clamp(-1, 1)
         
         # Calculate LPIPS loss
         perc_map = lpips_loss_fn(pred_n, tgt_n)
@@ -598,205 +694,72 @@ def calculate_perceptual_loss(pipe, latents, ref_latents, vgg, lpips_loss_fn, de
     except Exception as e:
         print(f"Error in perceptual loss calculation: {e}")
         return torch.tensor(0.0, device=device)
-        
-# AuraFace ID loss - temporarily disabled for training
-"""
-if config["loss_spatial"]["lambda_id"] > 0 and step_idx % config["loss_spatial"]["id_frequency"] == 0:
-            try:
-                lambda_id = config["loss_spatial"]["lambda_id"]
-                debug_print(f"ID loss active: lambda_id={lambda_id}, epoch={epoch}, step={step_idx}")
-                
-                # Process images and get embeddings
-                emb_preds = []
-                emb_tgts = []
-                
-        for batch_idx in range(latents.shape[0]):
-            try:
-                # Convert latents to images using helper function with batch index
-                pred_img = latent_to_image(pipe, latents, device, batch_idx)
-                tgt_img = latent_to_image(pipe, ref_latents, device, batch_idx)
-                        
-                        if batch_idx == 0:  # only print detailed info for the first image
-                    debug_print(f"AuraFace input - shape: {pred_img.shape}, dtype: {pred_img.dtype}")
-                    debug_print(f"Pixel range: min={pred_img.min()}, max={pred_img.max()}, mean={pred_img.mean():.2f}")
-                        
-                        # Save preview of target image for debugging
-                if batch_idx == 0 and output_dir is not None:
-                            preview_dir = Path(output_dir) / "aura_debug"
-                            preview_dir.mkdir(exist_ok=True, parents=True)
-                            preview_path = preview_dir / f"aura_input_{global_step}.png"
-                    
-                    # Create a grid showing both images with confidence scores
-                    W, H = pred_img.shape[1], pred_img.shape[0]
-                    grid = Image.new('RGB', (W * 2, H))
-                    
-                    # Add confidence scores to images
-                    pred_pil = Image.fromarray(pred_img)
-                    tgt_pil = Image.fromarray(tgt_img)
-                    
-                    # Draw confidence scores
-                    from PIL import ImageDraw
-                    draw_pred = ImageDraw.Draw(pred_pil)
-                    draw_tgt = ImageDraw.Draw(tgt_pil)
-                    
-                    # Get face detections first
-                    faces_pred = aura_model.get(pred_img)
-                    faces_tgt = aura_model.get(tgt_img)
-                    
-                    # Add confidence score text if faces are detected
-                    if len(faces_pred) > 0:
-                        draw_pred.text((10, 10), f"Conf: {faces_pred[0].det_score:.2f}", fill=(255, 255, 255))
-                    if len(faces_tgt) > 0:
-                        draw_tgt.text((10, 10), f"Conf: {faces_tgt[0].det_score:.2f}", fill=(255, 255, 255))
-                    
-                    grid.paste(pred_pil, (0, 0))
-                    grid.paste(tgt_pil, (W, 0))
-                    
-                    # Save the grid
-                    grid.save(preview_path)
-                            debug_print(f"Saved AuraFace input preview to {preview_path}")
-                        
-                # Get face detections
-                faces_pred = aura_model.get(pred_img)
-                faces_tgt = aura_model.get(tgt_img)
-                        
-                debug_print(f"Detected faces - pred: {len(faces_pred)}, target: {len(faces_tgt)}")
-                        
-                        # Handle case where no faces are detected
-                        if len(faces_pred) == 0 or len(faces_tgt) == 0:
-                    debug_print(f"Warning: No face detected in {'prediction' if len(faces_pred) == 0 else 'target'} for sample {batch_idx}")
-                            zero_embed = np.zeros(512, dtype=np.float32)
-                            emb_preds.append(zero_embed)
-                            emb_tgts.append(zero_embed)
-                            continue
-                        
-                        # Get the first face embedding
-                        emb_preds.append(faces_pred[0].normed_embedding)
-                        emb_tgts.append(faces_tgt[0].normed_embedding)
-                        
-                    except Exception as e:
-                        print(f"Error processing face {batch_idx}: {str(e)}")
-                        # Use zero embeddings
-                        zero_embed = np.zeros(512, dtype=np.float32)
-                        emb_preds.append(zero_embed)
-                        emb_tgts.append(zero_embed)
-                
-        # Calculate ID loss
-                if emb_preds and emb_tgts:
-                    emb_preds_tensor = torch.tensor(np.stack(emb_preds), dtype=torch.float32, device=device)
-                    emb_tgts_tensor = torch.tensor(np.stack(emb_tgts), dtype=torch.float32, device=device)
-                    
-                    # Calculate cosine similarity for each pair
-                    cos_sim = torch.sum(emb_preds_tensor * emb_tgts_tensor, dim=1)  # dot product of normalized vectors
-                    loss_id = (1.0 - cos_sim).mean()  # average over batch
-                    
-                    print(f"Identity loss: {loss_id.item()}")
-                    print(f"ID loss details: mean_cos_sim={cos_sim.mean().item():.6f}, loss={loss_id.item():.6f}, weighted={lambda_id * loss_id.item():.6f}")
-                    
-                    # Add to generator loss
-                    gen_loss += lambda_id * loss_id
-                else:
-                    loss_id = torch.tensor(0.0, device=device)
-                
-            except Exception as e:
-                print(f"Error in identity loss calculation: {e}")
-                loss_id = torch.tensor(0.0, device=device)
-"""
-
-def capture_final_latents(pipe, mesh_imgs, prompt, num_steps, guidance_scale):
-    """
-    Runs Img2Img with a callback and returns the final latent tensor [B,C,H,W].
-    Must be called *after* pipe.__call__ has been unwrapped.
-    """
-    latents_list = []
-    def _capture(pipeline, step, timestep, callback_kwargs):
-        if step == 5: # TODO: remove hardcoded step
-            latents_list.append(callback_kwargs["latents"].clone())
-        return callback_kwargs
-
-    # run the pipeline under full autograd
-    out = pipe(
-        image=mesh_imgs,
-        prompt=prompt,
-        num_inference_steps=num_steps,
-        guidance_scale=guidance_scale,
-        callback_on_step_end=_capture,
-        callback_on_step_end_tensor_inputs=["latents"],
-    )
     
-    return latents_list[0], out
+def calculate_id_loss(pipe, fake, real, resnet, mtcnn, device):
+    # faces_fake: [B,3,160,160], same for faces_real
 
-def denoise_for_gan(
-    pipe: StableDiffusionXLImg2ImgPipeline,
-    init_image: torch.Tensor,     # [B,3,H,W] in [-1,1]
-    prompt: str,
-    num_inference_steps: int,
-    strength: float,
-    guidance_scale: float,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Runs SDXL img2img exactly as pipe() would, but under autograd.
-    Returns final latents [B, C, H, W] with requires_grad=True.
-    """
+    # Scale images to 160x160 for face detection
+    fake = F.interpolate(fake, size=(160, 160), mode='bilinear', align_corners=False)
+    real = F.interpolate(real, size=(160, 160), mode='bilinear', align_corners=False)
+    # Permute from [B,H,W,3] to [B,3,H,W] for interpolation
+    fake = fake.permute(0, 2, 3, 1)
+    real = real.permute(0, 2, 3, 1)
 
-    # 1) Scheduler: same class & config as the pipeline uses
-    scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+    try:
+        faces_real = mtcnn(real.cpu())
+        if faces_real is None or (isinstance(faces_real, (list, tuple)) and len(faces_real) == 0):
+            print("⚠️ No faces detected in real image — skipping this batch")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Error in real face detection: {e}")
+        return torch.tensor(2., device=device)
+    
+    
+    try:
+        faces_fake = mtcnn(fake.cpu())
+        if faces_fake is None or (isinstance(faces_fake, (list, tuple)) and len(faces_fake) == 0):
+            print("⚠️ No faces detected in fake image — skipping this batch")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Error in fake face detection: {e}")
+        return torch.tensor(2., device=device)
+    debug_print(faces_fake)
+    debug_print(faces_real)
+    
+    # guard
+    if faces_fake == [None] or faces_real == [None]:
+        # either None or empty list
+        print("Skipping ID loss: insufficient faces")
+        return torch.tensor(2., device=device)
 
-    # 2) Get timesteps & sigmas via the pipeline's own helper
-    timesteps, _ = pipe._get_timesteps(
-        num_inference_steps=num_inference_steps,
-        strength=strength,
-    )    
+    # list → tensor
+    faces_fake = torch.cat([f.unsqueeze(0) for f in faces_fake], dim=0).to(device)
+    faces_real = torch.cat([f.unsqueeze(0) for f in faces_real], dim=0).to(device)
+    #print("faces_fake shape:", faces_fake.shape)
+    #print("faces_real shape:", faces_real.shape)
 
-    # 3) Prepare latents exactly as the pipeline does (VAE encode + scaling + noise)
-    init_image = pil_to_tensor(init_image, device=device)
-    latents = pipe.prepare_latents(
-        image=init_image,               # your [B,3,H,W] tensor
-        timestep=int(timesteps[0].item()),                # int scalar from get_timesteps()[0]
-        batch_size=init_image.shape[0],                   # e.g. init_image.shape[0] × num_per_prompt
-        num_images_per_prompt=1,        # usually 1 in GAN-training
-        dtype=scheduler.config.sample_dtype,          # match your U-Net dtype
-        device=device
-    ).requires_grad_(True)
+    # 3) Get embeddings
+    #    These are [B,512] L2-normalized by the model
+    try:
+        emb_fake = resnet(faces_fake)            # requires_grad=True
+        with torch.no_grad():
+            emb_real = resnet(faces_real)        # detach real to block grads back to data
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Error in embedding calculation: {e}")
+        return torch.tensor(2., device=device)
+    debug_print(emb_fake)
+    debug_print(emb_real)
 
-    # 4) Encode the prompt once for classifier-free guidance
-    bsz = init_image.shape[0]
-    cond, uncond, cond_p, uncond_p = pipe.encode_prompt(
-        [prompt]*bsz,
-        device=device,
-        do_classifier_free_guidance=True,
-    )
+    # 4) Compute identity loss (1 − cosine similarity)
+    #    F.cosine_similarity returns [B], so we take the mean
+    cos_sim = F.cosine_similarity(emb_fake, emb_real, dim=1)  # in [-1,1], 1=perfect match
+    id_loss = (1 - cos_sim).mean()                            # scalar loss
 
-    # 5) Reverse diffusion loop under autograd
-    for i, t in enumerate(timesteps.tolist()):
-        # a) Prepare model input for CFG
-        lat_in = torch.cat([latents, latents], dim=0)
-
-        # b) Scale for EulerDiscreteScheduler
-        lat_scaled = scheduler.scale_model_input(lat_in, t)
-
-        # c) UNet noise prediction
-        noise_pred = pipe.unet(
-            lat_scaled, 
-            t,
-            encoder_hidden_states=torch.cat([uncond, cond], dim=0),
-            added_cond_kwargs={
-                "orig_image_latents": lat_in,          # mesh or original latents
-                "text_embeds": torch.cat([uncond_p, cond_p], dim=0),
-                "time_ids": None,       # uses default in SDXL pipeline
-                "neg_time_ids": None,
-            },
-        ).sample
-
-        # d) CFG mixing
-        uncond_pred, cond_pred = noise_pred.chunk(2, dim=0)
-        eps = uncond_pred + guidance_scale * (cond_pred - uncond_pred)
-
-        # e) One denoising step
-        latents = scheduler.step(eps, t, latents).prev_sample
-
-    return latents
+    return id_loss
 
 def spatial_step(
     pipe,
@@ -812,11 +775,12 @@ def spatial_step(
     lr_scheduler,
     unet_ema,
     lpips_loss_fn,
-    aura_model,
     disc,
     seq_embeds,
     pooled_embeds,
     vgg,
+    mtcnn,
+    resnet,
     is_training: bool = True,
     output_dir: Optional[Path] = None,
 ):
@@ -834,11 +798,15 @@ def spatial_step(
     with context:
         noise_pred, noise, timesteps, noisy_ref, mesh_imgs, ref_imgs, mesh_latents, ref_latents = forward_pass(
             pipe, batch, noise_scheduler,
-            seq_embeds, pooled_embeds, device
+            seq_embeds, pooled_embeds, device,
+            epoch, config
         )
         
+        # Get alpha_bar for current timesteps
+        alpha_bar = noise_scheduler.alphas_cumprod[timesteps.cpu()].view(-1, 1, 1, 1).to(device)
+        
         # Calculate MSE and patch losses
-        mse_loss, patch_loss = calculate_mse_patch_loss(noise_pred, noise, config)
+        mse_loss, patch_loss = calculate_mse_patch_loss(noise_pred, noise, alpha_bar, config)
         
         # Initialize total loss
         total_loss = (
@@ -849,101 +817,89 @@ def spatial_step(
         # Get denoised latents for GAN if needed
         fake_latents = None
         if is_training and epoch >= config["schedule"]["spatial"]["gan_start"] and step_idx % config["loss_spatial"]["gan_frequency"] == 0:
-            # fake_latents = denoise_for_gan(
-            #     pipe,
-            #     init_image=mesh_imgs,
-            #     prompt=config["diffusion"]["prompt"],
-            #     num_inference_steps=config["diffusion"]["num_timesteps"],
-            #     strength=config["diffusion"]["denoising_strength"],
-            #     guidance_scale=config["diffusion"]["guidance_scale"],
-            #     device=device,
-            # )
-            #debug_print("denoise_for_gan done")
-            fake_latents, out = capture_final_latents(
-                pipe,
-                mesh_imgs,
+            out = pipe(
+                image=mesh_imgs,
                 prompt=config["diffusion"]["prompt"],
                 num_inference_steps=config["diffusion"]["num_timesteps"],
-                guidance_scale=config["diffusion"]["guidance_scale"]
+                guidance_scale=config["diffusion"]["guidance_scale"],
+                output_type="latent",
+                gradient=True
             )
-            print("requires_grad on latents:", fake_latents.requires_grad)  # -> True
-            
-            # Convert both real and fake latents to tensors in [-1,1] range
-            fake_imgs = []
-            real_imgs = []
-            
-            # Process all images in batch for discriminator
-            for i in range(fake_latents.shape[0]):
-                # Process fake image
-                fake_tensor = latent_to_image(pipe, fake_latents, device, i, return_type="tensor")
-                fake_imgs.append(fake_tensor.unsqueeze(0))  # [1,3,H,W]
-                
-                # Process real image
-                real_tensor = latent_to_image(pipe, ref_latents, device, i, return_type="tensor")
-                real_imgs.append(real_tensor.unsqueeze(0))  # [1,3,H,W]
-            
-            # Stack tensors
-            fake = torch.cat(fake_imgs, dim=0).to(device)
-            real = torch.cat(real_imgs, dim=0).to(device)
-            
+            fake_latents = out["images"] / pipe.vae.config.scaling_factor
+            ref_latents_for_decode = ref_latents / pipe.vae.config.scaling_factor
+
             # Save debug preview if output_dir is provided
             if output_dir is not None and step_idx % 2 == 0:
-                debug_print("Saving debug preview")
-                preview_dir = Path(output_dir) / "latent_debug"
-                preview_dir.mkdir(exist_ok=True, parents=True)
-                preview_path = preview_dir / f"latent_preview_{step_idx}.png"
-                
-                # Create a grid showing both real and fake images
-                W, H = 512, 512  # Assuming 512x512 images
-                grid = Image.new('RGB', (W * 2, H))
-                
-                fake_pil = latent_to_image(pipe, fake_latents, device, 0, return_type="pil")
-                real_pil = latent_to_image(pipe, ref_latents, device, 0, return_type="pil")
-                
-                # Add labels
-                from PIL import ImageDraw
-                draw_fake = ImageDraw.Draw(fake_pil)
-                draw_real = ImageDraw.Draw(real_pil)
-                draw_fake.text((10, 10), "Fake", fill=(255, 255, 255))
-                draw_real.text((10, 10), "Real", fill=(255, 255, 255))
-                
-                grid.paste(fake_pil, (0, 0))
-                grid.paste(real_pil, (W, 0))
-                
-                # Save the grid
-                grid.save(preview_path)
-                debug_print(f"Saved latent preview to {preview_path}")
+                with torch.no_grad():
+                    debug_print("Saving debug preview")
+                    preview_dir = Path(output_dir) / "latent_debug"
+                    preview_dir.mkdir(exist_ok=True, parents=True)
+                    preview_path = preview_dir / f"latent_preview_{step_idx}.png"
+                    
+                    # Create a grid showing both real and fake images
+                    W, H = 512, 512  # Assuming 512x512 images
+                    grid = Image.new('RGB', (W * 2, H))
+                    
+                    fake_pil = latent_to_image(pipe, fake_latents, device, 0, return_type="pil")
+                    real_pil = latent_to_image(pipe, ref_latents_for_decode, device, 0, return_type="pil")
+                    
+                    # Add labels
+                    from PIL import ImageDraw
+                    draw_fake = ImageDraw.Draw(fake_pil)
+                    draw_real = ImageDraw.Draw(real_pil)
+                    draw_fake.text((10, 10), "Fake", fill=(255, 255, 255))
+                    draw_real.text((10, 10), "Real", fill=(255, 255, 255))
+                    
+                    grid.paste(fake_pil, (0, 0))
+                    grid.paste(real_pil, (W, 0))
+                    
+                    # Save the grid
+                    grid.save(preview_path)
+                    debug_print(f"Saved latent preview to {preview_path}")
+            
+            # Convert both real and fake latents to tensors in [0,255] range
+            fake = latent_to_image(pipe, fake_latents, device, return_type="tensor")  # [B,3,H,W] for discriminator
+            real = latent_to_image(pipe, ref_latents_for_decode, device, return_type="tensor")   # [B,3,H,W] for discriminator
         
         # Add perceptual loss if applicable
         perc_loss = torch.tensor(0.0, device=device)
-        if epoch >= config["schedule"]["spatial"]["perceptual_start"] and step_idx % config["loss_spatial"]["lpips_frequency"] == 0:
-            if fake_latents is None: # single-step if GAN isn't active
-                fake_latents = noise_scheduler.step(
-                    model_output=noise_pred,
-                    timestep=timesteps,
-                    sample=noisy_ref
-                ).prev_sample
-                print("single step done")
-            perc_loss = calculate_perceptual_loss(pipe, fake_latents, ref_latents, vgg, lpips_loss_fn, device)
-            total_loss += config["loss_spatial"]["lambda_lpips"] * perc_loss
+        if epoch >= config["schedule"]["spatial"]["perceptual_start"] and step_idx % config["loss_spatial"]["perceptual_frequency"] == 0:
+            # Reconstruct predicted clean sample x0_pred using alpha_bar
+            x0_pred = (noisy_ref - (1 - alpha_bar).sqrt() * noise_pred) / alpha_bar.sqrt()
+            # Compute perceptual loss
+            perc_loss = calculate_perceptual_loss(
+                pipe, x0_pred.to(device), ref_latents.to(device), vgg, lpips_loss_fn, device
+            )
+            total_loss = total_loss + config['loss_spatial']['lambda_perceptual'] * perc_loss
     
     # Training-specific updates
     if is_training:
         # Discriminator update if applicable
         if epoch >= config["schedule"]["spatial"]["gan_start"] and step_idx % config["loss_spatial"]["gan_frequency"] == 0:
+            # Calculate ID loss
+            id_loss = calculate_id_loss(pipe, fake, real, resnet, mtcnn, device)  # Uses [B,H,W,3]
+            total_loss += config["loss_spatial"]["lambda_id"] * id_loss
+            losses["id_loss"] = id_loss.item()
+
             debug_print("\n[Discriminator Update]")
-            optimizer_D.zero_grad(set_to_none=True)
             
-            # Discriminator forward pass
-            logits_real = disc(real)
-            logits_fake = disc(fake)
-            
-            # Discriminator loss
-            loss_D_real = F.relu(1.0 - logits_real).mean(dim=None)
-            loss_D_fake = F.relu(1.0 + logits_fake).mean(dim=None)
-            loss_D = loss_D_real + loss_D_fake
+            criterion_mse = nn.MSELoss()
+            fake = fake.to(torch.float32).div(255.0)   # → [0,1]
+            real = real.to(torch.float32).div(255.0)   # → [0,1]
+
+            # Discriminator step
+            logits_real = disc(real)                  # ∈ [0,1]
+            logits_fake = disc(fake.detach())         # ∈ [0,1]
+
+            real_labels = torch.ones_like(logits_real)  # all 1s
+            fake_labels = torch.zeros_like(logits_fake) # all 0s
+
+            loss_D_real = criterion_mse(logits_real, real_labels)  # ∈ [0,1]
+            loss_D_fake = criterion_mse(logits_fake, fake_labels)  # ∈ [0,1]
+            loss_D      = 0.5*(loss_D_real + loss_D_fake)          # ∈ [0,1]
             
             # Update discriminator
+            optimizer_D.zero_grad(set_to_none=True)
             accelerator.backward(loss_D)
             optimizer_D.step()
             optimizer_D.zero_grad()
@@ -954,9 +910,9 @@ def spatial_step(
                 "loss_D_fake": loss_D_fake.item(),
             })
             
-            # Add GAN loss to generator
-            logits_fake_for_G = disc(fake)
-            loss_G_adv = -logits_fake_for_G.mean(dim=None)
+            # Generator step
+            # wants D(fake) → 1
+            loss_G_adv = criterion_mse(disc(fake), real_labels)  # ∈ [0,1]
             total_loss += config["loss_spatial"]["lambda_adv"] * loss_G_adv
             losses["loss_G_adv"] = loss_G_adv.item()
         else:
@@ -965,6 +921,7 @@ def spatial_step(
                 "loss_D_real": 0.0,
                 "loss_D_fake": 0.0,
                 "loss_G_adv": 0.0,
+                "id_loss": 0.0,
             })
         
         # Generator update
@@ -984,7 +941,6 @@ def spatial_step(
         "mse_loss": mse_loss.item(),
         "patch_loss": patch_loss.item(),
         "perc_loss": perc_loss.item(),
-        "id_loss": 0.0,
     })
     
     return losses
@@ -1134,7 +1090,7 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, resume_fro
     
     # Discriminator optimizer
     disc = PatchDiscriminator(in_channels=3).to(device)
-    opt_disc = torch.optim.AdamW(disc.parameters(), lr=float(config["training"]["learning_rate"]) * 0.5)
+    opt_disc = torch.optim.AdamW(disc.parameters(), lr=float(config["training"]["learning_rate"]))
 
     # Learning rate scheduler
     num_training_steps = len(train_loader) * config["schedule"]["spatial"]["num_epochs"]
@@ -1153,26 +1109,15 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, resume_fro
             lr_scheduler.load_state_dict(checkpoint_state["scheduler"])
     
     # Noise scheduler for diffusion
-    noise_scheduler = DPMSolverMultistepScheduler.from_pretrained(
+    noise_scheduler = DDPMScheduler.from_pretrained(
         sdxl_cache_path,
         subfolder="scheduler"
     )
+    noise_scheduler.set_timesteps(config["diffusion"]["num_timesteps"])
 
     # ─── Stage 7: Setup loss functions and perceptual models ───
-    # AuraFace perceptual model
-    modal_cache = os.getenv("MODAL_CACHE_DIR", "/workspace/cache")
-    aura_root = os.path.join(modal_cache, "insightface", "AuraFace-v1")
-    aura_model = FaceAnalysis(
-        name="auraface",      # matches the subfolder under models/
-        root=aura_root,
-        providers=["CUDAExecutionProvider"],  # or CPUExecutionProvider if no GPU
-    )
-    
-    # choose a small det_size since our crops are tight
-    aura_model.prepare(ctx_id=0, det_thresh=0.1, det_size=(256, 256))
-    debug_print(f">>> det_thresh={aura_model.det_thresh}   det_size={aura_model.det_size}")
-    debug_print(">>> aura_model attrs:", [a for a in dir(aura_model) if not a.startswith("_")])
-
+    mtcnn = MTCNN(image_size=160, device=device)
+    resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
     
     # LPIPS perceptual loss - initialized safely for our use case
     lpips_loss_fn = lpips.LPIPS(net='vgg', spatial=False).to(device)
@@ -1197,8 +1142,8 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, resume_fro
     )
 
     # Prepare all models with accelerator
-    optimizer, train_loader, val_loader, lr_scheduler, video_loader, disc, opt_disc, lpips_loss_fn, noise_scheduler = accelerator.prepare(
-        optimizer, train_loader, val_loader, lr_scheduler, video_loader, disc, opt_disc, lpips_loss_fn, noise_scheduler
+    optimizer, train_loader, val_loader, lr_scheduler, video_loader, disc, opt_disc, lpips_loss_fn, noise_scheduler, mtcnn, resnet = accelerator.prepare(
+        optimizer, train_loader, val_loader, lr_scheduler, video_loader, disc, opt_disc, lpips_loss_fn, noise_scheduler, mtcnn, resnet
     )
     
     # ───────────────────────────────────────────────── #
@@ -1262,10 +1207,12 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, resume_fro
                             device, accelerator,
                             optimizer, opt_disc, lr_scheduler,
                             unet_ema,
-                            lpips_loss_fn, aura_model, disc,
+                            lpips_loss_fn, disc,
                             seq_embeds, pooled_embeds,
                             vgg,
-                        is_training=True,
+                            mtcnn,
+                            resnet,
+                            is_training=True,
                             output_dir=output_dir
                         )
                         
@@ -1286,7 +1233,7 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, resume_fro
                     # Calculate weighted losses
                     weighted_mse = config["loss_spatial"]["lambda_mse"] * losses['mse_loss']
                     weighted_patch = config["loss_spatial"]["lambda_patch"] * losses['patch_loss']
-                    weighted_lpips = config["loss_spatial"]["lambda_lpips"] * losses.get('perc_loss', 0.0)
+                    weighted_perceptual = config["loss_spatial"]["lambda_perceptual"] * losses.get('perc_loss', 0.0)
                     weighted_gan_g = config["loss_spatial"]["lambda_adv"] * losses.get('loss_G_adv', 0.0)
                     
                     accelerator.print(
@@ -1294,9 +1241,10 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, resume_fro
                         f"Loss {loss:.4f} | "
                         f"MSE {losses['mse_loss']:.4f} (w: {weighted_mse:.4f}) | "
                         f"Patch {losses['patch_loss']:.4f} (w: {weighted_patch:.4f}) | "
-                        f"Perceptual {losses.get('perc_loss', 0.0):.4f} (w: {weighted_lpips:.4f}) | "
+                        f"Perceptual {losses.get('perc_loss', 0.0):.4f} (w: {weighted_perceptual:.4f}) | "
                         f"GAN G {losses.get('loss_G_adv', 0.0):.4f} (w: {weighted_gan_g:.4f}) | "
-                        f"GAN D {losses.get('loss_D', 0.0):.4f}"
+                        f"GAN D {losses.get('loss_D', 0.0):.4f} | "
+                        f"ID {losses.get('id_loss', 0.0):.4f}"
                     )
 
                 # Save preview images every so often
@@ -1332,9 +1280,11 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, resume_fro
                         device, accelerator,
                         optimizer, opt_disc, lr_scheduler,
                         unet_ema,
-                        lpips_loss_fn, aura_model, disc,
+                        lpips_loss_fn, disc,
                         seq_embeds, pooled_embeds,
                         vgg,
+                        mtcnn,
+                        resnet,
                         is_training=False,
                         output_dir=output_dir
                     )
@@ -1374,54 +1324,6 @@ def train_lora(character_name: str, output_dir: Optional[str] = None, resume_fro
             print(f"⚠️  Exiting early—saving best spatial LoRA (loss={best_spatial:.4f})")
             save_lora_state(pipe, unet_ema, output_dir/"best_model", config,
                             best_loss=best_spatial, is_best=True)
-
-    # ─── B) TEMPORAL TRAINING ────────────────────────────────────────────
-    """
-    # Latent-phase
-    best_latent, latent_patience = float('inf'), 0
-    for t_epoch in range(config["schedule"]["temporal"]["latent_phase_epochs"]):
-        pipe.unet.train()
-        total_loss = 0.0
-        
-        # use a small random subset of your video frames each epoch
-        few = config["loss_temporal"]["pairs_per_epoch"]
-        for i, (mesh_t, mesh_t1, flow) in enumerate(video_loader):
-            if i >= few: break
-            mesh_t  = mesh_t.to(device)
-            mesh_t1 = mesh_t1.to(device)
-            flow    = flow.to(device)
-            # warp mesh_t → mesh_t1 using your flow
-            B,C,H,W = mesh_t.shape
-            yy, xx = torch.meshgrid(
-                torch.linspace(-1,1,H,device=device),
-                torch.linspace(-1,1,W,device=device),
-                indexing='ij'
-            )
-            grid = torch.stack((xx, yy), -1).unsqueeze(0).repeat(B,1,1,1)
-            flow_norm = torch.zeros_like(grid, device=device)
-            flow_norm[...,0] = flow[:,0]/(W/2)
-            flow_norm[...,1] = flow[:,1]/(H/2)
-            warped = F.grid_sample(mesh_t.unsqueeze(0), grid+flow_norm, align_corners=True)
-            loss_temp = F.l1_loss(warped, mesh_t1.unsqueeze(0))
-            accelerator.backward(loss_temp * config["loss_temporal"]["lambda_id"])
-            optimizer.step()
-            optimizer.zero_grad()
-
-    # Pixel-polish phase
-    best_pixel, pixel_patience = float('inf'), 0
-    for p_epoch in range(config["schedule"]["temporal"]["pixel_phase_epochs"]):
-        train_temporal_pixel_epoch(pipe, optimizer, lr_scheduler,
-                                   video_loader, config, lpips_fn, ema)
-        val_pixel = validate_temporal_pixel(pipe, video_loader, config, lpips_fn)
-        if val_pixel < best_pixel:
-            best_pixel, pixel_patience = val_pixel, 0
-            save_checkpoint(pipe, ema, f"best_temporal_pixel")
-        else:
-            pixel_patience += 1
-            if pixel_patience >= config["training"]["temporal_early_stop_patience"]:
-                print("Early stopping TEMPORAL PIXEL")
-                break"""
-
     # Save final model
     if accelerator.is_main_process:
         save_lora_state(

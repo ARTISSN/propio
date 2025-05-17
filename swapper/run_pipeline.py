@@ -73,9 +73,14 @@ class CharacterPipeline:
         with open(self.metadata_path, 'w') as f:
             json.dump(self.metadata, f, indent=2)
 
-    def generate_mesh(self):
-        """Generate 3D mesh and normal maps from processed images."""
-        print(f"Generating mesh for {self.character_name}")
+    def generate_mesh(self, sample_rate: int = 1):
+        """
+        Generate 3D mesh and normal maps from processed images.
+        
+        Args:
+            sample_rate (int): Process every nth image. Default is 1 (process all images).
+        """
+        print(f"Generating mesh for {self.character_name} (sampling every {sample_rate}th image)")
         
         # Set up input and output directories
         source_image_dir = self.char_path / "source/images"
@@ -96,8 +101,14 @@ class CharacterPipeline:
             min_tracking_confidence=0.5,
         ) as face_mesh:
             print(f"Processing images in: {source_image_dir}")
-            # Process each image in the source directory
-            for img_path in source_image_dir.glob("*.*"):
+            # Get all image files and sort them
+            image_files = sorted(source_image_dir.glob("*.*"))
+            
+            # Process each nth image in the source directory
+            for idx, img_path in enumerate(image_files):
+                if idx % sample_rate != 0:
+                    continue
+                    
                 print(f"Processing image: {img_path}")
                 try:
                     mesh_data = generate_face_mesh(str(img_path), str(self.char_path), face_mesh)
@@ -474,14 +485,6 @@ class CharacterPipeline:
                 save_path = "/Users/rainergardner-olesen/Desktop/Artissn/face_swap/with_trained_lora/propio/swapper/data/characters/documale1/processed/finished/" + base_name
                 cv2.imwrite(save_path + '.png',  image)
 
-
-
-
-
-
-
-
-
 def main():
     parser = argparse.ArgumentParser(description="Run character processing pipeline")
     parser.add_argument("character", help="Character name to process")
@@ -489,6 +492,7 @@ def main():
     
     # Pipeline-specific arguments
     parser.add_argument("--mesh", action="store_true", help="Generate 3D mesh")
+    parser.add_argument("--sample-rate", type=int, default=1, help="Process every nth image when generating mesh (default: 1)")
     parser.add_argument("--maps", action="store_true", help="Generate texture and normal maps")
     parser.add_argument("--render", action="store_true", help="Render SH-lit images from maps and lighting coefficients")
     parser.add_argument("--draw", action="store_true", help="Draw faces on original images")
@@ -510,7 +514,7 @@ def main():
     run_all = args.all
     
     if args.mesh or run_all:
-        pipeline.generate_mesh()
+        pipeline.generate_mesh(sample_rate=args.sample_rate)
     if args.maps or run_all:
         pipeline.generate_maps(average_lighting=args.average_lighting)
     if args.train or run_all:

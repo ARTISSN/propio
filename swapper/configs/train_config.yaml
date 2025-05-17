@@ -14,10 +14,8 @@ schedule:
   spatial:
     num_epochs:         200              # total spatial epochs
     perceptual_start:   0                # epoch to start AuraFace & LPIPS
-    gan_start:          0               # epoch to start adversarial loss
-  temporal:
-    latent_phase_epochs: 10              # number of epochs in latent-space stage
-    pixel_phase_epochs:  10              # number of epochs in pixel-polish stage
+    gan_start:          0                # epoch to start adversarial loss
+    curriculum_step_frac: 0.1
 
 # ─── Diffusion Settings ──────────────────────────────────────────────────────
 diffusion:
@@ -30,12 +28,11 @@ diffusion:
 loss_spatial:
   lambda_mse:    1.0                     # latent MSE
   lambda_patch:  0.3                     # single-patch MSE
-  lambda_id:     0.25                    # AuraFace identity
-  lambda_lpips:  0.5                     # LPIPS (256², see below)
-  lambda_adv:    10                       # GAN generator weight
-  gan_frequency: 2                       # every N steps for both D & G
-  lpips_frequency: 2                     # every N steps for LPIPS
-  id_frequency: 4                        # every N steps for AuraFace ID
+  lambda_id:     1                    # AuraFace identity
+  lambda_perceptual:  1                     # LPIPS (256², see below)
+  lambda_adv:    1                       # GAN generator weight
+  gan_frequency: 3                       # every N steps for both D & G
+  perceptual_frequency: 2                     # every N steps for LPIPS
   patch_ratio: 0.2
 
 # ─── Temporal-Stage Loss Weights & Settings ──────────────────────────────────
@@ -64,7 +61,7 @@ training:
   batch_size:                   1
   gradient_accumulation_steps:  4
   learning_rate:                1e-4
-  warmup_ratio:                 0.001
+  warmup_ratio:                 0.0
   max_train_steps:              10000
   spatial_early_stop_patience:  10
   temporal_early_stop_patience: 3
